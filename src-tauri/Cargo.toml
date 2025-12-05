@@ -1,0 +1,61 @@
+[package]
+name = "colori"
+version = "0.0.0"
+description = "A color picker application powered by Tauri"
+authors = ["you"]
+license = ""
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tauri = { version = "2.0.0-rc", features = [ "tray-icon" ] } 
+chrono = "0.4"
+serde_json = "1.0" 
+serde = { version = "1", features = ["derive"] } 
+log = "0.4" 
+tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", features = [ "colored" ] }
+tauri-plugin-shell = "2.0.0-rc"
+enigo = "0.3" 
+winreg = "0.52"
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Gdi", 
+    "Win32_Foundation", 
+    "Win32_UI_WindowsAndMessaging", 
+    "Win32_UI_Magnification", 
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Graphics",         # 基础 WinRT Graphics
+    "Win32_System_WinRT_Graphics_Capture", # 关键修复：WGC 互操作支持
+    "Win32_System_WinRT_Direct3D11",       # 关键修复：D3D11 互操作支持
+    "Win32_System_SystemInformation",      # [修复] 添加系统信息获取支持
+    "Win32_System_Com",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Foundation_Numerics",
+    "System"
+] }
+# --- 截图依赖 (新增) ---
+xcap = "0.0.9" 
+image = "0.25" 
+base64 = "0.21"
+# --- UI 依赖 ---
+egui = "0.27"
+# 移除 egui-d3d11，我们将手写一个简单的适配层
+
+[features]
+# this feature is used for production builds to disable all API calls
+# that are not allowed by the `api-all` feature.
+# if you need the entire API feel free to remove this feature.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0-rc.0", features = [] }

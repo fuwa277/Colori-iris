@@ -1,0 +1,68 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": [
+    "main",
+    "monitor-*",
+    "ref-*",
+    "selector-*",
+    "overlay",
+    "sync_spot"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-create",
+    "core:window:allow-destroy",
+    "core:window:allow-close",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-is-visible",
+    "core:window:allow-is-minimized",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-inner-size",
+    "core:window:allow-set-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-center",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-skip-taskbar",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-set-decorations",
+    "core:window:allow-set-shadow",
+    "core:window:allow-set-resizable",
+    "core:window:allow-set-content-protected",
+    "core:window:allow-request-user-attention",
+    "core:webview:allow-create-webview-window",
+    "core:webview:allow-reparent",
+    "core:webview:allow-set-webview-zoom",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "start",
+          "cmd": "cmd",
+          "args": [
+            "/C",
+            "start",
+            "ms-settings:easeofaccess-colorfilter"
+          ],
+          "sidecar": false
+        },
+        {
+          "name": "open",
+          "cmd": "open",
+          "args": true
+        }
+      ]
+    }
+  ]
+}

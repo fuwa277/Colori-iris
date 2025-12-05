@@ -1,0 +1,71 @@
+{
+  "productName": "color-studio-tauri",
+  "version": "0.0.0",
+  "identifier": "com.tauri.dev",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Color Studio",
+        "label": "main",
+        "width": 290,
+        "height": 585,
+        "resizable": true,
+        "minHeight": 400,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "fullscreen": false,
+        "hiddenTitle": true,
+        "windowEffects": {
+          "effects": ["acrylic"],
+          "color": "#00000000"
+        }
+      },
+      {
+        "title": "Sync Spot",
+        "label": "sync_spot",
+        "width": 10,
+        "height": 10,
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true
+      },
+      {
+        "title": "Filter Overlay",
+        "label": "overlay",
+        "fullscreen": true,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false, 
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {}
+}
