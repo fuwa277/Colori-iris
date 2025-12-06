@@ -33,7 +33,8 @@ use windows::Win32::UI::Magnification::{
 // 引入 KEYBDINPUT, KEYEVENTF_KEYUP 等
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, SendInput, MOUSEINPUT, 
-    KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, KEYBD_EVENT_FLAGS
+    KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_SCANCODE, MapVirtualKeyW, MAP_VIRTUAL_KEY_TYPE // [修复] 引入扫描码支持及类型
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow, GetWindowThreadProcessId, EnumWindows, IsWindowVisible, GetWindowTextLengthW, IsIconic};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
@@ -1141,7 +1142,11 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
                             log_to_file(format!("Listener: Sync Key Detected (VK={}). Checking Process...", code));
                             // 进程检查逻辑...
                             let should_trigger = {
-                                let target_lock = TARGET_PROCESS_NAME.lock().unwrap();
+                                // [修复] 处理锁中毒 (PoisonError)，防止因其他线程 Panic 导致监听器崩溃
+                                let target_lock = match TARGET_PROCESS_NAME.lock() {
+                                    Ok(guard) => guard,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
                                 if let Some(target_name) = &*target_lock {
                                     if target_name.is_empty() { true } else {
                                         let hwnd = GetForegroundWindow();
@@ -1270,13 +1275,25 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     };
     
     thread::spawn(move || {
-        // --- 内部函数：发送按键 ---
+        // --- 内部函数：发送按键 (使用扫描码绕过输入法) ---
         unsafe fn send_key(vk: u16, up: bool) {
-            let flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+            // [修复] 获取硬件扫描码 (0 = MAPVK_VK_TO_VSC)
+            let scan_code = MapVirtualKeyW(vk as u32, MAP_VIRTUAL_KEY_TYPE(0)) as u16;
+            
+            // 组合标志位：添加 KEYEVENTF_SCANCODE
+            let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+            flags |= KEYEVENTF_SCANCODE;
+
             let input = INPUT {
                 r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                    ki: KEYBDINPUT { wVk: VIRTUAL_KEY(vk), wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 }
+                    ki: KEYBDINPUT { 
+                        wVk: VIRTUAL_KEY(vk), // 仍保留 VK 以兼容部分应用
+                        wScan: scan_code,     // [重点] 物理扫描码
+                        dwFlags: flags,       // [重点] 标记为使用扫描码
+                        time: 0, 
+                        dwExtraInfo: 0 
+                    }
                 }
             };
             SendInput(&[input], std::mem::size_of::<INPUT>() as i32);

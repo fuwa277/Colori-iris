@@ -294,6 +294,16 @@ impl WgcSession {
         self.d3d_context = None;
         self.d3d_device = None;
         self._dispatcher_controller = None;
+
+        // [修复] 显式清理 Context 中的缓存纹理，确保显存立即释放
+        if let Some(ctx_arc) = &self.active_context {
+            if let Ok(mut ctx) = ctx_arc.lock() {
+                ctx.textures.clear();
+                ctx.intermediate_texture = None;
+                ctx.cache_texture = None;
+                ctx.cache_srv = None;
+            }
+        }
     }
     
     pub fn resume(&mut self, target_hwnd: isize, is_region: bool, crop: Option<RECT>) -> Result<(), String> {
