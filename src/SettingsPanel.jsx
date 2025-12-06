@@ -9,6 +9,26 @@ export const SettingsPanel = ({
     iccProfile, setIccProfile, t 
 }) => {
     const [showAbout, setShowAbout] = useState(false);
+    // [新增] 管理当前正在录制的组件ID，实现互斥
+    const [activeRecorder, setActiveRecorder] = useState(null);
+
+    // [新增] 智能更新热键，自动处理冲突
+    const updateHotkey = (targetKey, newVal) => {
+        setSettings(prev => {
+            const next = { ...prev, [targetKey]: newVal };
+            // 冲突检测：如果设置了新值（非清空），检查是否被其他键占用
+            if (newVal) {
+                const keysToCheck = ['hotkeyGray', 'hotkeyPick', 'hotkeyMonitor', 'hotkeySyncKey', 'hotkeySyncPickKey'];
+                keysToCheck.forEach(k => {
+                    // 如果其他键的值等于当前设置的新值，则清空那个键（顶号逻辑）
+                    if (k !== targetKey && next[k] === newVal) {
+                        next[k] = ''; 
+                    }
+                });
+            }
+            return next;
+        });
+    };
 
     return (
         <div className="p-4 space-y-4 pb-10">
@@ -63,7 +83,11 @@ export const SettingsPanel = ({
                 <div className="flex justify-between items-center text-xs h-7">
                     <span className="w-16 truncate">{t('黑白滤镜', 'Gray Filter')}</span>
                     <div className="flex-1 flex justify-end gap-3 items-center">
-                        <HotkeyRecorder value={settings.hotkeyGray} onChange={(val) => setSettings({...settings, hotkeyGray: val})} placeholder="G" isDark={isDark} />
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyGray" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyGray} onChange={(val) => updateHotkey('hotkeyGray', val)} 
+                            placeholder="G" isDark={isDark} 
+                        />
                         <div onClick={() => setSettings({...settings, globalGray: !settings.globalGray})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalGray ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
                             <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalGray ? 'translate-x-4' : 'translate-x-0'}`} />
                         </div>
@@ -73,7 +97,11 @@ export const SettingsPanel = ({
                 <div className="flex justify-between items-center text-xs h-7">
                     <span className="w-16 truncate">{t('屏幕取色', 'Pick Color')}</span>
                     <div className="flex-1 flex justify-end gap-3 items-center">
-                        <HotkeyRecorder value={settings.hotkeyPick} onChange={(val) => setSettings({...settings, hotkeyPick: val})} placeholder="SPACE" isDark={isDark} />
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyPick" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyPick} onChange={(val) => updateHotkey('hotkeyPick', val)} 
+                            placeholder="SPACE" isDark={isDark} 
+                        />
                         <div onClick={() => setSettings({...settings, globalPick: !settings.globalPick})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalPick ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
                             <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalPick ? 'translate-x-4' : 'translate-x-0'}`} />
                         </div>
@@ -83,7 +111,11 @@ export const SettingsPanel = ({
                 <div className="flex justify-between items-center text-xs h-7">
                     <span className="w-16 truncate">{t('定点吸色', 'Monitor')}</span>
                     <div className="flex-1 flex justify-end gap-3 items-center">
-                        <HotkeyRecorder value={settings.hotkeyMonitor} onChange={(val) => setSettings({...settings, hotkeyMonitor: val})} placeholder="F2" isDark={isDark} />
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyMonitor" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyMonitor} onChange={(val) => updateHotkey('hotkeyMonitor', val)} 
+                            placeholder="F2" isDark={isDark} 
+                        />
                         <div onClick={() => setSettings({...settings, globalMonitor: !settings.globalMonitor})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalMonitor ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
                             <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalMonitor ? 'translate-x-4' : 'translate-x-0'}`} />
                         </div>
@@ -91,12 +123,19 @@ export const SettingsPanel = ({
                 </div>
                 
                 <div className={`mt-2 pt-2 border-t border-gray-500/10 space-y-3`}>
+                    {/* [优化] 增加管理员权限提示 */}
+                    <div className="bg-yellow-500/10 border border-yellow-500/20 rounded p-2 mb-2">
+                        <span className="text-[9px] text-yellow-500/80 flex gap-1 leading-tight">
+                            ⚠️ {t('提示：如果吸色在 Photoshop 等软件中不生效，请尝试以“管理员身份运行”本软件。', 'Tip: Run as Administrator if sync fails in apps like Photoshop.')}
+                        </span>
+                    </div>
+
                     <div className="flex justify-between items-center">
                         <div className="flex flex-col">
                             <span className="text-xs font-bold">{t('跨应用吸色同步', 'Auto-Dropper Sync')}</span>
                             <span className="text-[9px] opacity-50">{t('在目标软件按键时自动吸取当前色', 'Auto pick color into app')}</span>
                         </div>
-                        <button onClick={() => setSettings({...settings, hotkeySyncEnabled: !settings.hotkeySyncEnabled})} className={`w-8 h-4 rounded-full flex items-center px-0.5 transition-colors ${settings.hotkeySyncEnabled ? 'bg-green-500' : 'bg-gray-500'}`}>
+                        <button onClick={() => setSettings({...settings, hotkeySyncEnabled: !settings.hotkeySyncEnabled})} className={`w-8 h-4 rounded-full flex items-center px-0.5 transition-colors ${settings.hotkeySyncEnabled ? 'bg-green-500' : 'bg-gray-500/30'}`}>
                             <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.hotkeySyncEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
                         </button>
                     </div>
@@ -105,11 +144,19 @@ export const SettingsPanel = ({
                         <div className="space-y-2 pl-2 border-l-2 border-gray-500/10">
                             <div className="flex justify-between items-center text-xs">
                                 <span>{t('触发按键', 'Trigger Key')}</span>
-                                <HotkeyRecorder value={settings.hotkeySyncKey} onChange={(val) => setSettings({...settings, hotkeySyncKey: val})} placeholder="None" isDark={isDark} />
+                                <HotkeyRecorder 
+                                    uniqueKey="hotkeySyncKey" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                                    value={settings.hotkeySyncKey} onChange={(val) => updateHotkey('hotkeySyncKey', val)} 
+                                    placeholder="None" isDark={isDark} 
+                                />
                             </div>
                             <div className="flex justify-between items-center text-xs">
                                 <span>{t('目标软件屏幕拾色快捷键', 'Target Software Pick Key')}</span>
-                                <HotkeyRecorder value={settings.hotkeySyncPickKey} onChange={(val) => setSettings({...settings, hotkeySyncPickKey: val})} placeholder="None" isDark={isDark} />
+                                <HotkeyRecorder 
+                                    uniqueKey="hotkeySyncPickKey" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                                    value={settings.hotkeySyncPickKey} onChange={(val) => updateHotkey('hotkeySyncPickKey', val)} 
+                                    placeholder="None" isDark={isDark} 
+                                />
                             </div>
                             <div className="space-y-1">
                                 <div className="flex justify-between items-center">
@@ -148,7 +195,10 @@ export const SettingsPanel = ({
                                 try {
                                     const json = JSON.parse(ev.target.result);
                                     if (typeof json.r === 'number' && typeof json.g === 'number' && typeof json.b === 'number' && json.name) {
-                                        alert(t("导入成功 (需重启应用): " + json.name, "Imported: " + json.name));
+                                        // [新增] 持久化保存
+                                        localStorage.setItem('colori_custom_icc', JSON.stringify(json));
+                                        alert(t("导入成功 (即将刷新): " + json.name, "Imported: " + json.name));
+                                        window.location.reload(); // 自动刷新
                                     } else {
                                         alert("Invalid JSON: r/g/b must be numbers.");
                                     }
@@ -164,6 +214,13 @@ export const SettingsPanel = ({
                             <option value="rec601">Rec.601 (SDTV / Default)</option>
                             <option value="bt709">ITU-R BT.709 (HDTV)</option>
                             <option value="average">Linear Average (1/3)</option>
+                            {/* [新增] 动态渲染自定义选项 */}
+                            {(() => {
+                                try {
+                                    const c = JSON.parse(localStorage.getItem('colori_custom_icc'));
+                                    if(c) return <option value="custom">{c.name} (Custom)</option>;
+                                } catch(e){}
+                            })()}
                         </select>
                     </div>
                 </div>
@@ -194,12 +251,22 @@ export const SettingsPanel = ({
                             <div className={`p-5 rounded-xl ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
                                 <div className="text-xs space-y-2 leading-relaxed opacity-80">
                                     <p>作者：<span className="font-bold">枣</span></p>
-                                    <p>主页：<a href="#" className="text-blue-400 hover:underline">https://github.com/fuwa277/Colori-iris</a></p>
+                                    <p>主页：<a href="#" className="text-blue-400 hover:underline break-all">https://github.com/fuwa277/Colori-iris</a></p>
                                     <div className="w-full h-[1px] bg-current opacity-10 my-3"></div>
                                     {/* 加粗免费声明，删除“仅供学习交流”，添加禁止盈利 */}
                                     <p><span className="font-bold text-sm">本软件为免费发布</span></p>
                                     <p className="text-red-400/90 font-bold text-sm">不得售卖此软件进行盈利</p>
-                                    <div className="mt-2 text-[10px] opacity-50">Design & Code by 枣. All Rights Reserved.</div>
+                                    
+                                    {/* 免责声明 */}
+                                    <div className="mt-3 pt-3 border-t border-current/10">
+                                        <p className="font-bold mb-1 opacity-70">免责声明 (Disclaimer):</p>
+                                        <ul className="list-disc pl-3 space-y-1 opacity-60 text-[9px]">
+                                            <li>请务必从官方渠道 (GitHub/小红书主页) 下载，非本人发布渠道获取的软件版本无法保证安全性，可能存在被篡改风险，后果由用户自行承担。</li>
+                                            <li>严禁利用本软件从事任何违反法律法规的活动。</li>
+                                        </ul>
+                                    </div>
+
+                                    <div className="mt-3 text-[10px] opacity-50">Design & Code by 枣. All Rights Reserved.</div>
                                 </div>
                             </div>
 

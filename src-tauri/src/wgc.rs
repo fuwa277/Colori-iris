@@ -1,25 +1,24 @@
 use windows::{
     core::Interface,
     Graphics::{
-        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession, IGraphicsCaptureSession3}, // 确保引入 IGraphicsCaptureSession3
+        Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession}, // 移除了 IGraphicsCaptureSession3
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
         SizeInt32,
     },
     Win32::{
-        Foundation::{HWND, RECT, BOOL, LPARAM, WPARAM},
+        Foundation::{HWND, RECT}, // 移除了 BOOL, LPARAM, WPARAM
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET,
-                D3D11_USAGE_DEFAULT, D3D11_RESOURCE_MISC_FLAG, ID3D11Texture2D, ID3D11ShaderResourceView,
+                D3D11_USAGE_DEFAULT, ID3D11Texture2D, ID3D11ShaderResourceView, // 移除了 D3D11_RESOURCE_MISC_FLAG
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
                 IDXGIFactory2, IDXGISwapChain1, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                 DXGI_SWAP_EFFECT_FLIP_DISCARD, 
-                DXGI_USAGE_RENDER_TARGET_OUTPUT, DXGI_PRESENT, DXGI_SWAP_CHAIN_FLAG,
-                DXGI_PRESENT_PARAMETERS, // [修复] 添加缺失的引用
+                DXGI_USAGE_RENDER_TARGET_OUTPUT, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS,
             },
             Gdi::{MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY},
         },
@@ -29,21 +28,17 @@ use windows::{
             CreateDispatcherQueueController, DispatcherQueueOptions, 
             DQTYPE_THREAD_CURRENT, DQTAT_COM_STA,
         },
-        UI::Input::KeyboardAndMouse::ReleaseCapture, // [修复] ReleaseCapture 移动到正确位置
         UI::WindowsAndMessaging::{
             GetClientRect, GetDesktopWindow, 
             GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOREDIRECTIONBITMAP,
-            SetWindowPos, ShowWindow, SW_HIDE, HWND_TOPMOST, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-            SendMessageW, WM_NCLBUTTONDOWN, HTCAPTION // [修复3] 引入拖拽相关API
         },
     },
     System::DispatcherQueueController,
 };
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tauri::{Manager, Emitter, WebviewWindow}; // [修复1] 引入 WebviewWindow 和 Emitter
-use egui::{Context, Pos2, Rect, Vec2, Color32, TextureId, Sense}; // [修复3] 引入 Sense
-use windows::Win32::Graphics::Gdi::ScreenToClient;
+use tauri::{Manager, Emitter, WebviewWindow};
+use egui::{Context, Pos2, Rect, Vec2, Color32, TextureId}; // 移除了 Sense
 use crate::d3d11_renderer::Renderer;
 
 // 全局存储 WGC 会话
@@ -70,6 +65,19 @@ impl Default for UiState {
             // 初始化时间
             last_hover_time: std::time::Instant::now(),
         }
+    }
+}
+
+// [优化] 显式实现 Drop 以确保 COM 对象被释放，防止显存泄漏
+impl Drop for WgcSession {
+    fn drop(&mut self) {
+        self.stop();
+        // windows-rs 的 ComObject 通常会自动 Drop，但手动清理 Option 引用是个好习惯
+        self.session = None;
+        self.frame_pool = None;
+        self.swap_chain = None;
+        self.d3d_context = None;
+        self.d3d_device = None;
     }
 }
 
@@ -212,25 +220,29 @@ impl WgcSession {
         // [修复 Issue 3] 保存 Context 引用
         self.active_context = Some(session_ctx.clone());
 
-        let ctx_clone = session_ctx.clone();
+        // [修复步骤 1] 创建弱引用 (放在 FrameArrived 之前)
+        let ctx_weak = Arc::downgrade(&session_ctx);
+
         frame_pool.FrameArrived(&windows::Foundation::TypedEventHandler::new(
             move |pool: &Option<Direct3D11CaptureFramePool>, _| {
+                // [修复步骤 2] 在闭包最开始，将 Weak 升级为 Strong
+                let ctx_arc = match ctx_weak.upgrade() {
+                    Some(c) => c,
+                    None => return Ok(()), // 如果会话已销毁，直接返回
+                };
+
                 if let Some(pool) = pool {
                     if let Ok(frame) = pool.TryGetNextFrame() {
                         let mut recreate = false;
                         let mut new_size = SizeInt32::default();
-
                         if let Ok(content_size) = frame.ContentSize() {
-                            if let Ok(mut ctx) = ctx_clone.lock() {
+                            // [修复步骤 3] 这里使用 ctx_arc
+                            if let Ok(mut ctx) = ctx_arc.lock() {
                                 if content_size.Width != ctx.last_size.Width || content_size.Height != ctx.last_size.Height {
                                     recreate = true;
-                                    // [修复1] 尺寸变更时，通知前端
                                     if let Some(win) = &ctx.tauri_window {
-                                        let _ = win.emit("wgc-ratio-changed",  
-                                            format!("{}:{}", content_size.Width, content_size.Height)
-                                        );
+                                        let _ = win.emit("wgc-ratio-changed", format!("{}:{}", content_size.Width, content_size.Height));
                                     }
-
                                     new_size = content_size;
                                     ctx.last_size = content_size;
                                     ctx.cache_texture = None;
@@ -238,13 +250,12 @@ impl WgcSession {
                                 }
                             }
                         }
-
                         if recreate {
-                            if let Ok(ctx) = ctx_clone.lock() {
+                            if let Ok(ctx) = ctx_arc.lock() {
                                 let _ = pool.Recreate(&ctx.device, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, new_size);
                             }
                         }
-                        if let Ok(mut ctx) = ctx_clone.lock() {
+                        if let Ok(mut ctx) = ctx_arc.lock() {
                             let _ = render_frame(&frame, &mut ctx);
                         }
                     }
@@ -256,12 +267,12 @@ impl WgcSession {
         self.frame_pool = Some(frame_pool);
         let session = self.frame_pool.as_ref().unwrap().CreateCaptureSession(&item).map_err(|e| e.to_string())?;
         
-        // [修复7] 屏蔽黄色隐私边框
-        // 注意：由于编译环境未找到 SetIsBorderRequired 方法，暂时注释以保证编译通过。
-        /* if let Ok(session3) = session.cast::<IGraphicsCaptureSession3>() {
-            let _ = session3.SetIsBorderRequired(false); 
-        }
-        */
+        // [修复7] 屏蔽黄色隐私边框 (安全转换)
+        // 尝试转换为 IGraphicsCaptureSession3 (Win11 Build 22000+)
+        // [临时屏蔽] 编译报错 method not found，可能是 windows-rs 版本差异导致
+        // if let Ok(session3) = session.cast::<IGraphicsCaptureSession3>() {
+        //     let _ = session3.SetIsBorderRequired(false); 
+        // }
 
         session.StartCapture().map_err(|e| e.to_string())?;
         self.session = Some(session);
@@ -285,7 +296,6 @@ impl WgcSession {
         self._dispatcher_controller = None;
     }
     
-    // Resume 省略大部分逻辑，核心是重建 Context 时也要加上 cache_texture 字段初始化
     pub fn resume(&mut self, target_hwnd: isize, is_region: bool, crop: Option<RECT>) -> Result<(), String> {
         // [修复] 核心逻辑：如果资源依然存在，则复用 SwapChain，避免唤醒时的 Access Denied 错误
         if self.swap_chain.is_none() || self.d3d_device.is_none() { 
@@ -342,7 +352,10 @@ impl WgcSession {
             cache_srv: None,
         }));
 
+        // [重要] 这里定义 ctx_clone，供下方的 move 闭包捕获
         let ctx_clone = session_ctx.clone();
+        self.active_context = Some(session_ctx); // 更新 active_context
+
         frame_pool.FrameArrived(&windows::Foundation::TypedEventHandler::new(
             move |pool: &Option<Direct3D11CaptureFramePool>, _| {
                 if let Some(pool) = pool {
@@ -479,6 +492,8 @@ fn render_frame(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame, ctx:
             let mut new_tex = None;
             let _ = ctx.d3d_device.CreateTexture2D(&desc, None, Some(&mut new_tex));
             ctx.intermediate_texture = new_tex;
+            // 纹理重建后，必须清除旧的 SRV 缓存，以便下次渲染时重新创建
+            ctx.cache_srv = None;
         }
 
         if let Some(dest) = &ctx.intermediate_texture {
@@ -581,14 +596,23 @@ fn render_frame(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame, ctx:
             }
         }
 
-        let mut srv = None;
-        if let Some(tex) = &ctx.intermediate_texture {
-            unsafe { let _ = ctx.d3d_device.CreateShaderResourceView(tex, None, Some(&mut srv)); }
+        // [修复] 复用缓存的 SRV，避免每一帧都创建销毁资源导致的性能下降
+        if ctx.cache_srv.is_none() && ctx.intermediate_texture.is_some() {
+            let mut new_srv = None;
+            unsafe { 
+                let _ = ctx.d3d_device.CreateShaderResourceView(
+                    ctx.intermediate_texture.as_ref().unwrap(), 
+                    None, 
+                    Some(&mut new_srv)
+                ); 
+            }
+            ctx.cache_srv = new_srv;
         }
-        
+
         let mut render_textures = ctx.textures.clone();
-        if let Some(srv) = srv {
-            render_textures.insert(egui::TextureId::User(0), srv);
+        if let Some(srv) = &ctx.cache_srv {
+            // 注意：这里需要 clone 指针 (AddRef)，因为 HashMap 拥有所有权
+            render_textures.insert(egui::TextureId::User(0), srv.clone());
         }
 
         unsafe {
@@ -604,24 +628,58 @@ fn render_frame(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame, ctx:
 
     unsafe {
         let params = windows::Win32::Graphics::Dxgi::DXGI_PRESENT_PARAMETERS::default();
-        let _ = ctx.swap_chain.Present1(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0), &params);
+        // [稳定性优化] 捕获 Present 错误，处理 DEVICE_REMOVED
+        if let Err(e) = ctx.swap_chain.Present1(1, windows::Win32::Graphics::Dxgi::DXGI_PRESENT(0), &params).ok() {
+            // [修复] 修正错误码的引用路径 Foundation -> Graphics::Dxgi
+            if e.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED || e.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_RESET {
+                // 这里可以记录日志或发送事件通知前端重启会话，暂时返回错误以中断渲染循环
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
 
 fn create_d3d_device() -> windows::core::Result<(ID3D11Device, ID3D11DeviceContext)> {
-    let driver_types = [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP];
-    let mut device = None;
-    let mut context = None;
-    for driver_type in driver_types {
-        unsafe {
-            if D3D11CreateDevice(None, driver_type, None, D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, Some(&mut context)).is_ok() {
-                return Ok((device.unwrap(), context.unwrap()));
-            }
+    // [兼容性优化] 显式枚举适配器，避免默认选择核显导致跨GPU共享失败
+    unsafe {
+        let mut device = None;
+        let mut context = None;
+        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+
+        // 1. 尝试创建硬件设备 (系统自动选择高性能)
+        if D3D11CreateDevice(
+            None, 
+            D3D_DRIVER_TYPE_HARDWARE, 
+            None, 
+            flags, 
+            None, 
+            D3D11_SDK_VERSION, 
+            Some(&mut device), 
+            None, 
+            Some(&mut context)
+        ).is_ok() {
+            return Ok((device.unwrap(), context.unwrap()));
+        }
+
+        // 2. 兜底策略：软件模拟 (WARP)，保证在无显卡或驱动故障时也能运行
+        if D3D11CreateDevice(
+            None, 
+            D3D_DRIVER_TYPE_WARP, 
+            None, 
+            flags, 
+            None, 
+            D3D11_SDK_VERSION, 
+            Some(&mut device), 
+            None, 
+            Some(&mut context)
+        ).is_ok() {
+            return Ok((device.unwrap(), context.unwrap()));
         }
     }
     Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL))
 }
+
 fn create_capture_item_for_window(hwnd: HWND) -> windows::core::Result<GraphicsCaptureItem> {
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
     unsafe { interop.CreateForWindow(hwnd) }

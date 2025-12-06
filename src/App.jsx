@@ -21,6 +21,16 @@ const log = window.logToFile;
 // 初始化 Mag API
 invoke('init_mag_api').catch(e => console.error("Mag Init Failed:", e));
 
+// [新增] 启动时从本地存储加载自定义 ICC
+try {
+    const savedIcc = localStorage.getItem('colori_custom_icc');
+    if (savedIcc) {
+        const parsed = JSON.parse(savedIcc);
+        // 动态注入到算法库，键名固定为 'custom'
+        LUMA_ALGORITHMS['custom'] = parsed;
+    }
+} catch (e) { console.error("Load Custom ICC Failed:", e); }
+
 /**
  * MAIN APP
  */
@@ -50,19 +60,58 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-      const unlisten = listen('tauri://file-drop', (event) => {
+      // --- [Probe Start] 拖拽调试探针 ---
+      console.log("[App] File Drop Listener Mounted");
+
+      const unlistenHover = listen('tauri://file-drop-hover', (event) => {
+          console.log('[Probe] Drag Hover detected:', event); // 如果这行没打印，说明被系统拦截了
+      });
+
+      const unlistenCancel = listen('tauri://file-drop-cancelled', () => {
+          console.log('[Probe] Drag Cancelled');
+      });
+
+      const unlistenDrop = listen('tauri://file-drop', (event) => {
+          console.log('[Probe] Drop Event:', event);
+          
           if (event.payload && event.payload.length > 0) {
+              console.log('[Probe] File Paths:', event.payload);
               const filePath = event.payload[0];
               const label = `ref-file-${Date.now()}`;
               localStorage.setItem('ref-temp-path', filePath); 
-              new WebviewWindow(label, {
-                  url: 'index.html',
-                  width: 300, height: 300,
-                  decorations: false, transparent: true, alwaysOnTop: true
-              });
+              // 尝试创建窗口
+              try {
+                  const win = new WebviewWindow(label, {
+                      url: 'index.html',
+                      width: 300, height: 300,
+                      decorations: false, transparent: true, alwaysOnTop: true
+                  });
+                  console.log('[Probe] Window creating:', label);
+              } catch (e) {
+                  console.error('[Probe] Window creation failed:', e);
+              }
+          } else {
+              console.warn('[Probe] Drop payload is empty!');
           }
       });
-      return () => { unlisten.then(f => f()); };
+
+      return () => { 
+          unlistenDrop.then(f => f && f()); 
+          unlistenHover.then(f => f && f());
+          unlistenCancel.then(f => f && f());
+      };
+      // --- [Probe End] ---
+  }, []);
+
+  // [修复 Issue 1] 优先从 URL 参数读取路径，解决 LocalStorage 竞态导致的裂图
+  useEffect(() => {
+      if (appWindow.label.startsWith('ref-')) {
+          const params = new URLSearchParams(window.location.search);
+          const path = params.get('path');
+          if (path) {
+              localStorage.setItem('ref-temp-path', path);
+          }
+      }
   }, []);
 
   // 1. 路由分发 (子窗口逻辑)
@@ -789,7 +838,7 @@ export default function App() {
         {/* 底部调整高度手柄 */}
         <div 
             className="h-1.5 w-full cursor-ns-resize z-[200] hover:bg-slate-500/20 transition-colors absolute bottom-0 left-0"
-            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); appWindow.startResizing(); }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); appWindow.startResizeDragging(2); }}
         />
       </div>
       <style>{`

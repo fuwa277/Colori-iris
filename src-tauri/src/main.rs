@@ -1,5 +1,9 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use tauri::{Manager, Emitter};
 use std::sync::Mutex;
+// use std::fs; // Unused
+// use std::path::PathBuf; // Unused
 use std::process::Command;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::fs::OpenOptions;
@@ -9,7 +13,9 @@ use winreg::RegKey;
 use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
 use windows::Win32::Foundation::{POINT, HWND, LPARAM, BOOL};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_CONTROL, VK_SHIFT, VK_MENU, VK_XBUTTON1, VK_XBUTTON2};
+// [修复] 引入 GetSystemMetrics 和 SM_SWAPBUTTON
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON}; 
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON, VK_CONTROL, VK_SHIFT, VK_MENU, VK_XBUTTON1, VK_XBUTTON2};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     CreateWindowExW, SetWindowPos, 
@@ -56,6 +62,8 @@ static SYNC_MODS: AtomicI32 = AtomicI32::new(0);   // 修饰键掩码 (1=Ctrl, 2
 static SYNC_PICK_KEY: Mutex<String> = Mutex::new(String::new()); // 目标软件取色键 (如 B, I)
 // 是否启用同步
 static SYNC_ENABLED: AtomicBool = AtomicBool::new(false);
+// [新增] 是否正在录制热键 (防止录制时误触)
+static IS_RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 // 防止监听器重复启动
 static LISTENER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -70,6 +78,13 @@ static HK_MONI_MODS: AtomicI32 = AtomicI32::new(0);
 static HK_GLOBAL_FLAGS: AtomicI32 = AtomicI32::new(0); // 位掩码: 1=Gray, 2=Pick, 4=Moni
 // 目标进程名称 (None 代表不限制)
 static TARGET_PROCESS_NAME: Mutex<Option<String>> = Mutex::new(None);
+
+#[tauri::command]
+fn set_hotkey_recording_status(is_recording: bool) {
+    IS_RECORDING_HOTKEY.store(is_recording, Ordering::Relaxed);
+    // 先注释：打印日志方便调试
+    // log_to_file(format!("Hotkey Recording Status: {}", is_recording));
+}
 
 #[tauri::command]
 async fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<String, String> {
@@ -90,11 +105,20 @@ async fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<String, String
     let start_x = (x - monitor.x()) as u32;
     let start_y = (y - monitor.y()) as u32;
 
-    // 4. 裁剪图像 (确保不越界)
-    let clip_w = w.min(monitor.width() as u32);
-    let clip_h = h.min(monitor.height() as u32);
+    // 4. 裁剪图像 (修复：严格边界检查防止 Panic)
+    let img_w = image.width();
+    let img_h = image.height();
+    
+    // 确保起点在图像内
+    if start_x >= img_w || start_y >= img_h {
+        return Err("Crop region is outside monitor bounds".to_string());
+    }
 
-    let sub_image = crop_imm(&image, start_x, start_y, clip_w, clip_h);
+    // 确保宽高不越界
+    let safe_w = w.min(img_w - start_x);
+    let safe_h = h.min(img_h - start_y);
+
+    let sub_image = crop_imm(&image, start_x, start_y, safe_w, safe_h);
 
     // 5. 编码为 PNG 和 Base64
     let mut buf = Vec::new();
@@ -313,17 +337,97 @@ fn diagnose_window(name: String) -> String {
 fn log_to_file(msg: String) {
     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
     let log_msg = format!("[{}] {}", timestamp, msg);
-    // 同时打印到控制台，方便在终端查看
     println!("{}", log_msg);
     
-    // 写入文件
+    let log_path = "colori_debug.log";
+    
+    // 检查文件大小，超过 1MB 则清空重写
+    if let Ok(metadata) = std::fs::metadata(log_path) {
+        if metadata.len() > 1024 * 1024 {
+            let _ = std::fs::write(log_path, ""); 
+        }
+    }
+
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open("colori_debug.log") 
+        .open(log_path) 
     {
         let _ = writeln!(file, "{}", log_msg);
     }
+}
+
+// --- 图片临时文件管理 ---
+#[tauri::command]
+fn save_temp_image(data_url: String) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir().join("colori_temp");
+    if !temp_dir.exists() {
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    }
+
+    // 解析 Base64 (data:image/png;base64,....)
+    let parts: Vec<&str> = data_url.split(',').collect();
+    if parts.len() != 2 { return Err("Invalid Data URL".to_string()); }
+    
+    let base64_data = parts[1];
+    let bytes = general_purpose::STANDARD.decode(base64_data).map_err(|e| e.to_string())?;
+    
+    let file_name = format!("ref_{}.png", chrono::Local::now().timestamp_millis());
+    let file_path = temp_dir.join(&file_name);
+    
+    std::fs::write(&file_path, bytes).map_err(|e| e.to_string())?;
+    
+    // 返回绝对路径
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn clean_temp_images() {
+    let temp_dir = std::env::temp_dir().join("colori_temp");
+    if temp_dir.exists() {
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+}
+
+// [修复 Issue 1 & 4] 后端直接读取图片为 Base64，绕过 asset 协议问题
+#[tauri::command]
+fn read_image_as_base64(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    // 简单判断图片类型，默认 png
+    let b64 = general_purpose::STANDARD.encode(bytes);
+    // 这里为了通用性，直接返回带 Data URI 前缀的字符串
+    // 你可以根据文件扩展名优化 mime type，这里简化处理
+    Ok(format!("data:image/png;base64,{}", b64))
+}
+
+// [修复 Issue 2] 后端读取剪贴板并保存为临时文件，解决前端插件调用失败
+#[tauri::command]
+fn save_clipboard_to_temp(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    
+    // 1. 读取剪贴板图像
+    let clipboard_image = app.clipboard().read_image().map_err(|e| format!("Clipboard error: {}", e))?;
+    
+    // 2. 转换为 image crate 的 DynamicImage
+    // ClipboardImage 通常是 RGBA8
+    let width = clipboard_image.width() as u32;
+    let height = clipboard_image.height() as u32;
+    let rgba_data = clipboard_image.rgba();
+    
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width, height, rgba_data.to_vec())
+        .ok_or("Failed to create image buffer")?;
+    
+    // 3. 保存到临时目录 (复用 save_temp_image 的路径逻辑)
+    let temp_dir = std::env::temp_dir().join("colori_temp");
+    if !temp_dir.exists() {
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    }
+    let file_name = format!("clip_{}.png", chrono::Local::now().timestamp_millis());
+    let file_path = temp_dir.join(&file_name);
+    
+    buffer.save(&file_path).map_err(|e| format!("Failed to save image: {}", e))?;
+    
+    Ok(file_path.to_string_lossy().to_string())
 }
 
 // --- 新增：模拟按键 (用于跨应用吸色) ---
@@ -508,8 +612,11 @@ fn get_mouse_pos() -> (i32, i32) {
 #[tauri::command]
 fn is_mouse_down() -> bool {
     unsafe {
-        // 如果最高位为1，则键处于按下状态
-        let state = GetAsyncKeyState(VK_LBUTTON.0 as i32);
+        // [交互优化] 检测是否交换了左右键 (左撇子模式)
+        let swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+        let target_key = if swapped { VK_RBUTTON } else { VK_LBUTTON };
+        
+        let state = GetAsyncKeyState(target_key.0 as i32);
         (state as u16 & 0x8000) != 0
     }
 }
@@ -900,7 +1007,7 @@ fn log_window_style(app_handle: tauri::AppHandle, label: String) {
          unsafe {
              if let Ok(hwnd_ptr) = window.hwnd() {
                  let hwnd = HWND(hwnd_ptr.0 as _);
-                 let style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                 let _style = GetWindowLongW(hwnd, GWL_EXSTYLE);
                  // println!("[Style Debug] Window '{}' ExStyle: {:X}", label, style); // Issue 5: Removed
              }
          }
@@ -1022,6 +1129,10 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
 
                 // 1. Sync Macro Check
                 if SYNC_ENABLED.load(Ordering::Relaxed) {
+                    // [新增] 关键检查：如果在录制热键，则跳过触发检查
+                    if IS_RECORDING_HOTKEY.load(Ordering::Relaxed) {
+                        continue; 
+                    }
                     let code = SYNC_HOTKEY.load(Ordering::Relaxed);
                     let target_mods = SYNC_MODS.load(Ordering::Relaxed);
                     if code != 0 {
@@ -1144,11 +1255,19 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     // 1. 获取目标窗口和按键配置
     let target_app_hwnd = unsafe { GetForegroundWindow() };
     let target_hwnd_val = target_app_hwnd.0 as usize;
-    let pick_key_str = SYNC_PICK_KEY.lock().unwrap().clone();
     
-    let spot_window = app.get_webview_window("sync_spot");
-    if spot_window.is_none() { return; }
-    let spot_window = spot_window.unwrap();
+    // [优化] 使用 unwrap_or_default 防止锁中毒，并克隆字符串
+    let pick_key_str = SYNC_PICK_KEY.lock().map(|k| k.clone()).unwrap_or_default();
+    if pick_key_str.is_empty() { return; }
+    
+    // [优化] 安全解包：如果 sync_spot 窗口意外丢失，静默失败而不是崩溃
+    let spot_window = match app.get_webview_window("sync_spot") {
+        Some(w) => w,
+        None => {
+            log_to_file("Error: Sync spot window not found, macro aborted.".to_string());
+            return;
+        }
+    };
     
     thread::spawn(move || {
         // --- 内部函数：发送按键 ---
@@ -1177,7 +1296,11 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
         }
 
         unsafe {
-            let hwnd_val = spot_window.hwnd().unwrap().0 as isize;
+            // [修复] 安全获取句柄，防止窗口销毁时崩溃
+            let hwnd_val = match spot_window.hwnd() {
+                Ok(h) => h.0 as isize,
+                Err(_) => return, // 窗口已失效，静默终止
+            };
             let spot_hwnd = HWND(hwnd_val as _);
 
             // 2. 获取鼠标位置
@@ -1197,8 +1320,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             );
             let _ = ShowWindow(spot_hwnd, SW_SHOWNOACTIVATE);
             
-            // 等待渲染 (增加到 30ms 确保色块已上屏)
-            thread::sleep(Duration::from_millis(30));
+            // [优化] 等待渲染：增加到 50ms，适应低刷新率屏幕或高负载 CPU
+            thread::sleep(Duration::from_millis(50));
 
             // --- 步骤 2: 触发取色 (按键) ---
             let parts: Vec<&str> = pick_key_str.split('+').collect();
@@ -1211,8 +1334,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
                 }
             }
             
-            // 等待软件响应进入吸管模式
-            thread::sleep(Duration::from_millis(30));
+            // [优化] 等待软件响应：增加到 60ms，某些重型软件(如PS)切换工具较慢
+            thread::sleep(Duration::from_millis(60));
 
             // --- 步骤 3: 模拟点击 ---
             // 再次校准鼠标位置
@@ -1264,14 +1387,29 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
 fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
+    .plugin(tauri_plugin_clipboard_manager::init()) // 修复: 注册剪贴板插件
     .manage(WindowState {
       is_topmost: Mutex::new(false),
     })
+    // [修复] 监听窗口销毁事件，防止 WGC 会话残留导致的内存泄漏
+    .on_window_event(|window, event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            let label = window.label().to_string();
+            if label.starts_with("monitor-") {
+                // 自动清理对应的 WGC 会话
+                wgc::stop_wgc_session(label);
+            }
+        }
+    })
     .setup(|app| {
-        // --- 托盘初始化逻辑 ---
-        let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-        let show_i = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-        let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+        // --- 托盘初始化逻辑 (Fix 10) ---
+        // 启动时清理临时文件 (Fix 8)
+        clean_temp_images();
+
+        let show_i = MenuItem::with_id(app, "show", "显示界面 (Show)", true, None::<&str>)?;
+        let reset_i = MenuItem::with_id(app, "reset", "重置位置 (Reset Pos)", true, None::<&str>)?;
+        let quit_i = MenuItem::with_id(app, "quit", "退出 (Exit)", true, None::<&str>)?;
+        let menu = Menu::with_items(app, &[&show_i, &reset_i, &quit_i])?;
 
         let _tray = TrayIconBuilder::with_id("tray")
             .menu(&menu)
@@ -1282,6 +1420,15 @@ fn main() {
                 "show" => {
                     if let Some(win) = app.get_webview_window("main") {
                         let _ = win.show();
+                        let _ = win.set_focus();
+                        if win.is_minimized().unwrap_or(false) { let _ = win.unminimize(); }
+                    }
+                },
+                "reset" => {
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.center(); // 重置到屏幕中心
                         let _ = win.set_focus();
                     }
                 }
@@ -1348,7 +1495,12 @@ fn main() {
         ensure_window_clickable,
         log_window_style,
         force_window_clickable,
-        get_app_windows_tree
+        get_app_windows_tree,
+        save_temp_image,
+        clean_temp_images,
+        read_image_as_base64, // 新增
+        save_clipboard_to_temp,
+        set_hotkey_recording_status // 新增
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

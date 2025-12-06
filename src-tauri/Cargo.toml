@@ -16,7 +16,8 @@ serde = { version = "1", features = ["derive"] }
 log = "0.4" 
 tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", features = [ "colored" ] }
 tauri-plugin-shell = "2.0.0-rc"
-enigo = "0.3" 
+tauri-plugin-clipboard-manager = "2.0.0-rc"
+enigo = "0.3"
 winreg = "0.52"
 windows = { version = "0.58", features = [
     "Win32_Graphics_Gdi", 

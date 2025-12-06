@@ -27,8 +27,10 @@ export const useTauriBackend = () => {
                     const rect = colorBlockRef.current.getBoundingClientRect();
                     const winPos = await appWindow.outerPosition();
                     
-                    const screenX = Math.round(winPos.x + rect.left + rect.width / 2);
-                    const screenY = Math.round(winPos.y + rect.top + rect.height / 2);
+                    // Fix 7: 兼容 DPI 缩放 (DOM Rect 是逻辑像素，winPos 是物理像素)
+                    const dpr = window.devicePixelRatio || 1;
+                    const screenX = Math.round(winPos.x + (rect.left + rect.width / 2) * dpr);
+                    const screenY = Math.round(winPos.y + (rect.top + rect.height / 2) * dpr);
                     
                     await invoke('update_sync_coords', { x: screenX, y: screenY });
                 } catch (e) {

@@ -43,6 +43,8 @@
     "core:webview:allow-set-webview-zoom",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "clipboard-manager:default",
+    "clipboard-manager:allow-read-image",
     "shell:allow-open",
     {
       "identifier": "shell:allow-execute",

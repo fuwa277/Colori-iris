@@ -158,10 +158,11 @@ export const MonitorWindow = () => {
         window.addEventListener('mousedown', debugHandler);
 
         return () => {
-            unlistenClose.then(f=>f());
-            unlistenDestroy.then(f=>f());
-            unlistenWake.then(f=>f());
-            unlistenGraySync.then(f=>f());
+            // [稳定性优化] 确保清理函数正确执行，防止内存泄漏
+            unlistenClose.then(f => f && f());
+            unlistenDestroy.then(f => f && f());
+            unlistenWake.then(f => f && f());
+            unlistenGraySync.then(f => f && f());
             clearInterval(minCheckTimer);
             window.removeEventListener('mousedown', debugHandler);
         };
@@ -191,28 +192,40 @@ export const MonitorWindow = () => {
             }
         });
 
+        // [优化] 使用 resizeDebounceRef (顶层定义) 进行简单的节流/防抖，修复 Hook 调用错误
+        // const resizeTimeoutRef = React.useRef(null); // 删除此行: 不能在 useEffect 中调用 Hooks
+
         const unlistenResize = appWindow.onResized(async () => {
-             // 1. 每次尺寸变化，通知 WGC 更新画面
              const size = await appWindow.innerSize();
-             invoke('update_wgc_resize', { label: appWindow.label, w: size.width, h: size.height });
+             
+             if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
 
-             if (!aspectRatio) return;
+             resizeDebounceRef.current = setTimeout(() => {
+                 // [添加保护] 防止窗口销毁后继续执行
+                 if (!resizeDebounceRef.current) return;
+                 
+                 invoke('update_wgc_resize', { label: appWindow.label, w: size.width, h: size.height });
 
-             // [Issue 4 修复] 实时修正比例，不做防抖，防止画面拉伸过程中出现黑边
-             if (aspectRatio > 0) {
-                 const currentRatio = size.width / size.height;
-                 // 只有当比例偏差较大时才强制调整，避免死循环
-                 if (Math.abs(currentRatio - aspectRatio) > 0.05) {
-                     const newHeight = Math.round(size.width / aspectRatio);
-                     // 立即设置，感觉会更跟手
-                     appWindow.setSize(new PhysicalSize(size.width, newHeight)).catch(()=>{});
+                 if (!aspectRatio) return;
+
+                 if (aspectRatio > 0) {
+                     const currentRatio = size.width / size.height;
+                     if (Math.abs(currentRatio - aspectRatio) > 0.05) {
+                         const newHeight = Math.round(size.width / aspectRatio);
+                         appWindow.setSize(new PhysicalSize(size.width, newHeight)).catch(()=>{});
+                     }
                  }
-             }
+             }, 16);
         });
         
         return () => { 
-            unlistenResize.then(f=>f()); 
-            unlistenRatio.then(f=>f());
+            // [修复] 组件卸载时，必须清除 pending 的计时器
+            if (resizeDebounceRef.current) {
+                clearTimeout(resizeDebounceRef.current);
+                resizeDebounceRef.current = null;
+            }
+            unlistenResize.then(f => f && f()); 
+            unlistenRatio.then(f => f && f());
         };
     }, [aspectRatio]);
 
@@ -303,7 +316,7 @@ export const MonitorWindow = () => {
                 </div>
             )}
 
-            {/* Resize 把手 */}
+            {/* Resize 把手 - [回退] 兼容旧版 Tauri API (startResizing) */}
             <div className="resize-handle absolute top-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent"
                  onMouseDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(1); }} />
             <div className="resize-handle absolute bottom-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent"
@@ -524,23 +537,54 @@ export const ReferenceWindow = () => {
     const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
     const [isDraggingView, setIsDraggingView] = useState(false);
 
+    // [修复 Issue 1 & 4] 加载图片逻辑重构
+    const loadRefImage = async (pathOrUrl) => {
+        if (!pathOrUrl) return;
+        
+        // 如果是 Base64 或 http 链接直接显示
+        if (pathOrUrl.startsWith('data:') || pathOrUrl.startsWith('http')) {
+            setImgSrc(pathOrUrl);
+            return;
+        }
+
+        // 如果是本地路径，调用后端读取 Base64，彻底解决 asset 协议裂图问题
+        try {
+            const base64 = await invoke('read_image_as_base64', { path: pathOrUrl });
+            setImgSrc(base64);
+        } catch (e) {
+            console.error("Load ref failed:", e);
+            // 失败时尝试回退到 asset 协议 (通常不会走到这)
+            import('@tauri-apps/api/core').then(({ convertFileSrc }) => setImgSrc(convertFileSrc(pathOrUrl)));
+        }
+    };
+
     useEffect(() => {
+        // 1. 优先从 URL 参数读取路径 (解决 LocalStorage 竞态)
+        const params = new URLSearchParams(window.location.search);
+        const urlPath = params.get('path');
+        
+        if (urlPath) {
+            loadRefImage(urlPath);
+        } else {
+            // 2. 兼容旧逻辑 (截图预览等)
+            const tempImg = localStorage.getItem('ref-temp-img');
+            const tempPath = localStorage.getItem('ref-temp-path');
+            
+            if (tempPath) {
+                loadRefImage(tempPath);
+                localStorage.removeItem('ref-temp-path');
+            } else if (tempImg) {
+                setImgSrc(tempImg);
+                localStorage.removeItem('ref-temp-img');
+            }
+        }
+
         const unlisten = listen('tauri://file-drop', (event) => {
              if(event.payload && event.payload.length > 0) {
-                 import('@tauri-apps/api/core').then(({ convertFileSrc }) => setImgSrc(convertFileSrc(event.payload[0])));
+                 loadRefImage(event.payload[0]);
              }
         });
         invoke('set_window_topmost', { label: appWindow.label, topmost: true });
-        
-        const tempImg = localStorage.getItem('ref-temp-img');
-        const tempPath = localStorage.getItem('ref-temp-path');
-        const applySrc = (src) => { setImgSrc(src); };
-
-        if (tempImg) { applySrc(tempImg); localStorage.removeItem('ref-temp-img'); }
-        else if (tempPath) {
-            import('@tauri-apps/api/core').then(({ convertFileSrc }) => applySrc(convertFileSrc(tempPath)));
-            localStorage.removeItem('ref-temp-path');
-        }
         
         const unlistenIgnore = listen('update-ref-ignore', (event) => {
             if (appWindow.label.startsWith('ref-')) {
@@ -548,7 +592,7 @@ export const ReferenceWindow = () => {
                 invoke('set_ignore_cursor_events', { label: appWindow.label, ignore: event.payload });
             }
         });
-        return () => { unlisten.then(f=>f()); unlistenIgnore.then(f=>f()); };
+        return () => { unlisten.then(f => f && f()); unlistenIgnore.then(f => f && f()); };
     }, []);
 
     const handleWheel = (e) => {
@@ -607,13 +651,13 @@ export const ReferenceWindow = () => {
             )}
             {!ignoreMouse && (
                 <>
-                    {/* 边缘缩放把手 */}
-                    <div className="absolute top-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizing(1);}} />
-                    <div className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizing(2);}} />
-                    <div className="absolute top-0 left-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizing(3);}} />
-                    <div className="absolute top-0 right-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizing(4);}} />
+                    {/* 边缘缩放把手 - [修复] 更新 API */}
+                    <div className="absolute top-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(1);}} />
+                    <div className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(2);}} />
+                    <div className="absolute top-0 left-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(8);}} />
+                    <div className="absolute top-0 right-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(4);}} />
                     <div className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-50 bg-white/10 hover:bg-slate-500 rounded-tl clip-triangle pointer-events-auto"
-                        onMouseDown={(e) => { e.stopPropagation(); appWindow.startResizing(); }} />
+                        onMouseDown={(e) => { e.stopPropagation(); appWindow.startResizeDragging(6); }} />
                 </>
             )}
             

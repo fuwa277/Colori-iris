@@ -12,8 +12,28 @@ import {
 const appWindow = getCurrentWindow();
 
 // --- 组件: 快捷键录制器 ---
-export const HotkeyRecorder = ({ value, onChange, placeholder, isDark }) => {
-    const [recording, setRecording] = useState(false);
+export const HotkeyRecorder = ({ value, onChange, placeholder, isDark, uniqueKey, activeRecorder, onActivate }) => {
+    // 状态受控：判断当前组件是否处于录制状态
+    const recording = activeRecorder === uniqueKey;
+
+    // [新增] 封装开始录制逻辑
+    const startRecording = (e) => {
+        e.stopPropagation(); // 防止冒泡
+        if (onActivate) onActivate(uniqueKey); // 通知父组件激活当前ID
+        // 通知后端：开始录制，暂停宏触发
+        invoke('set_hotkey_recording_status', { isRecording: true }).catch(console.error);
+    };
+
+    // [新增] 封装结束录制逻辑
+    const stopRecording = (newValue) => {
+        if (onActivate) onActivate(null); // 通知父组件取消激活
+        onChange(newValue);
+        // 延时恢复：给用户一点时间松开按键，防止松手慢了触发宏
+        setTimeout(() => {
+            invoke('set_hotkey_recording_status', { isRecording: false }).catch(console.error);
+        }, 500); 
+    };
+
     const handleKeyDown = (e) => {
         if (!recording) return;
         e.preventDefault(); e.stopPropagation();
@@ -25,11 +45,10 @@ export const HotkeyRecorder = ({ value, onChange, placeholder, isDark }) => {
         
         let key = e.key.toUpperCase();
         const ignore = ['CONTROL','SHIFT','ALT','META'];
-        if (ignore.includes(key)) return;
+        if (ignore.includes(key)) return; // 仅按修饰键不结束录制
         
         if (key === 'ESCAPE' || key === 'DELETE' || key === 'BACKSPACE') {
-            onChange(''); 
-            setRecording(false);
+            stopRecording(''); // 使用封装的停止函数
             return;
         }
 
@@ -37,14 +56,17 @@ export const HotkeyRecorder = ({ value, onChange, placeholder, isDark }) => {
         key = map[key] || key;
 
         keys.push(key);
-        // 允许设置为空
-        onChange(keys.join('+'));
-        setRecording(false);
+        
+        // 结束录制
+        stopRecording(keys.join('+')); // 使用封装的停止函数
     };
 
-    // 右键清除: 明确设为空字符串
+    // 右键清除
     const handleContextMenu = (e) => {
         e.preventDefault();
+        // 修复：右键同时也需要取消录制状态，否则会一直卡在红色录制态
+        if (onActivate) onActivate(null);
+        invoke('set_hotkey_recording_status', { isRecording: false }).catch(()=>{});
         onChange('');
     };
 
@@ -53,7 +75,7 @@ export const HotkeyRecorder = ({ value, onChange, placeholder, isDark }) => {
 
     return (
         <button 
-            onClick={() => setRecording(true)} 
+            onClick={startRecording} 
             onKeyDown={handleKeyDown}
             onContextMenu={handleContextMenu}
             className={`
@@ -233,9 +255,9 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
         {/* 问题1: 布局重构 */}
         <div className="flex items-end justify-between px-4 pb-2 h-[27px] -mt-6 relative z-30">
              {/* 左侧：圆槽 + 混色条 (下沉) */}
-             {/*  pl-[10px]向右移, translate-y-0.5 向下移 */}
+             {/* Fix 5: 增加 ring-1 ring-black/10 确保白色时可见 */}
              <div className="flex items-center gap-2 pl-[8px] translate-y-0.5">
-                 <div onClick={() => onSlotClick(1)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ${activeSlot === 1 ? `border-white ring-1 ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0) }} />
+                 <div onClick={() => onSlotClick(1)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 1 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0) }} />
                  <div 
                     className="w-[130px] h-[10px] rounded-full relative cursor-crosshair overflow-hidden border border-black/5 dark:border-white/10 group touch-none"
                     onPointerDown={(e) => {
@@ -268,7 +290,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                     <div className="absolute inset-0" style={{ background: `linear-gradient(to right, ${rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0)}, ${rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0)})` }} />
                     <div className="absolute inset-0 opacity-0 group-hover:opacity-100 bg-white/10 transition-opacity" />
                  </div>
-                 <div onClick={() => onSlotClick(2)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ${activeSlot === 2 ? `border-white ring-1 ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0) }} />
+                 <div onClick={() => onSlotClick(2)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 2 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0) }} />
              </div>
 
              {/* 右侧：方槽 + 上方功能键 */}
@@ -631,16 +653,24 @@ export const ScreenCanvas = ({ isDark, filterId, lang }) => {
     };
 
     useEffect(() => {
+        let animationFrameId; // 追踪 ID
+        let isActive = true;  // 追踪挂载状态
+
         if (stream && videoRef.current) {
             videoRef.current.play();
             const loop = () => {
-                if (!videoRef.current || !canvasRef.current) return;
+                if (!isActive || !videoRef.current || !canvasRef.current) return;
                 const ctx = canvasRef.current.getContext('2d');
                 ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-                requestAnimationFrame(loop);
+                animationFrameId = requestAnimationFrame(loop);
             };
-            requestAnimationFrame(loop);
+            animationFrameId = requestAnimationFrame(loop);
         }
+        
+        return () => {
+            isActive = false;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+        };
     }, [stream]);
 
     const containerStyle = isDocked 
@@ -932,24 +962,31 @@ export const ScreenPanel = ({ isDark, lang, sources, setSources }) => {
 
     const ensurePipWindow = async (src) => {
         const label = `monitor-${src.id}`;
-        // if(window.logToFile) window.logToFile(`[ScreenPanel] Operating on window: ${label}`);
         
         const win = await WebviewWindow.getByLabel(label);
         
         if (win) {
             try {
-                const isVisible = await win.isVisible(); 
+                // [修复 Issue 3] 强制状态同步，不单纯依赖 isVisible
+                // 使用 src.active 作为更可靠的逻辑判断 (因为 isVisible 是异步且可能在动画中滞后)
+                const shouldShow = !src.active;
                 
-                if (isVisible) {
-                    // 如果可见，则隐藏 (UI 按钮变成 "隐藏")
-                    // 调用 Pause + Hide
+                if (!shouldShow) {
+                    // 隐藏
                     await invoke('pause_wgc_session', { label });
                     await win.hide();
                     await win.setSkipTaskbar(true);
                     emit('monitor-visibility-changed', { label, visible: false });
                 } else {
-                    // 如果隐藏，则唤醒
-                    // 发送事件让子窗口处理 Resume 逻辑
+                    // 唤醒：[关键] 强制在主进程调用 Show，确保窗口可见
+                    await win.setSkipTaskbar(false);
+                    // 如果窗口被最小化了，先还原
+                    if (await win.isMinimized()) await win.unminimize();
+                    
+                    await win.show();
+                    await win.setFocus();
+                    
+                    // 发送事件通知子窗口重启 WGC 会话
                     await emit('pip-wake', { target: label });
                     emit('monitor-visibility-changed', { label, visible: true });
                 }
