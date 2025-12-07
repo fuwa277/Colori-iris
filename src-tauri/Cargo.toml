@@ -17,6 +17,7 @@ log = "0.4"
 tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", features = [ "colored" ] }
 tauri-plugin-shell = "2.0.0-rc"
 tauri-plugin-clipboard-manager = "2.0.0-rc"
+tauri-plugin-single-instance = "2.0.0-rc"
 enigo = "0.3"
 winreg = "0.52"
 windows = { version = "0.58", features = [

@@ -203,6 +203,59 @@ export default function App() {
   const luma = useMemo(() => getLuminance(rgb.r, rgb.g, rgb.b, iccProfile), [rgb, iccProfile]);
   const t = (zh, en) => lang === 'zh' ? zh : en;
 
+  // --- 新增：本地文件数据同步 ---
+  // 1. 启动时读取文件 (合并到 State)
+  useEffect(() => {
+      const initLoad = async () => {
+          try {
+              const jsonStr = await invoke('load_config_file');
+              if (!jsonStr || jsonStr === "{}") return; // 文件不存在或为空，使用 localStorage 的默认值
+              
+              const data = JSON.parse(jsonStr);
+              console.log("Loaded config from file:", data);
+
+              if (data.settings) setSettings(prev => ({...prev, ...data.settings}));
+              if (data.colorSlots) setColorSlots(data.colorSlots);
+              if (data.activeSlot !== undefined) setActiveSlot(data.activeSlot);
+              if (data.paletteHistory) setPaletteHistory(data.paletteHistory);
+              if (data.savedPalette) setSavedPalette(data.savedPalette);
+              if (data.isDark !== undefined) setIsDark(data.isDark);
+              if (data.lang) setLang(data.lang);
+              if (data.iccProfile) setIccProfile(data.iccProfile);
+              
+              // 特殊处理自定义ICC
+              if (data.customIcc) {
+                  localStorage.setItem('colori_custom_icc', JSON.stringify(data.customIcc));
+                  LUMA_ALGORITHMS['custom'] = data.customIcc;
+              }
+          } catch (e) {
+              console.error("Failed to load config file:", e);
+          }
+      };
+      initLoad();
+  }, []);
+
+  // 2. 数据变更时防抖写入文件
+  useEffect(() => {
+      const timer = setTimeout(() => {
+          const dataToSave = {
+              settings,
+              colorSlots,
+              activeSlot,
+              paletteHistory,
+              savedPalette,
+              isDark,
+              lang,
+              iccProfile,
+              customIcc: JSON.parse(localStorage.getItem('colori_custom_icc') || 'null')
+          };
+          invoke('save_config_file', { data: JSON.stringify(dataToSave, null, 2) })
+              .catch(e => console.error("Save failed:", e));
+      }, 1000); // 1秒防抖，避免频繁IO
+
+      return () => clearTimeout(timer);
+  }, [settings, colorSlots, activeSlot, paletteHistory, savedPalette, isDark, lang, iccProfile]);
+
   // --- 副作用 (Effects) ---
   useEffect(() => localStorage.setItem('colori_history', JSON.stringify(paletteHistory)), [paletteHistory]);
   useEffect(() => localStorage.setItem('colori_saved', JSON.stringify(savedPalette)), [savedPalette]);
@@ -762,7 +815,7 @@ export default function App() {
                        <Pin size={12} className={settings.topmost ? "fill-current" : ""}/>
                     </button>
                    <button onClick={() => appWindow.minimize()} className="p-1 opacity-40 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10 rounded transition"><Minimize2 size={12}/></button>
-                   <button onClick={() => appWindow.close()} className="p-1 opacity-40 hover:opacity-100 hover:bg-red-500 hover:text-white rounded transition"><X size={12}/></button>
+                   <button onClick={() => appWindow.hide()} className="p-1 opacity-40 hover:opacity-100 hover:bg-red-500 hover:text-white rounded transition"><X size={12}/></button>
                </div>
 
                <div className="flex items-center gap-2 pr-0.5">

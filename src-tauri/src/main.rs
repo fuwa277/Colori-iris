@@ -8,6 +8,8 @@ use std::process::Command;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::fs; // 新增
+use std::path::Path; // 新增
 use winreg::enums::*;
 use winreg::RegKey;
 use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
@@ -456,6 +458,29 @@ fn trigger_system_grayscale() {
             let _ = enigo.key(Key::Meta, Direction::Release);
         }
     });
+}
+
+#[tauri::command]
+fn get_config_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join("colori_data.json")))
+}
+
+#[tauri::command]
+fn save_config_file(data: String) -> Result<(), String> {
+    if let Some(path) = get_config_path() {
+        fs::write(path, data).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn load_config_file() -> Result<String, String> {
+    if let Some(path) = get_config_path() {
+        if path.exists() {
+            return fs::read_to_string(path).map_err(|e| e.to_string());
+        }
+    }
+    Ok("{}".to_string()) // 如果文件不存在返回空JSON
 }
 
 // 获取当前运行的应用程序列表 (用于前端下拉框)
@@ -1402,24 +1427,27 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     });
 }
 
-fn main() {
-  // [修复] 单实例锁 (Single Instance Lock)
-  // 如果检测到互斥体已存在，说明已有实例运行，直接退出
-  unsafe {
-      let mutex_name = w!("Global\\ColoriAppInstanceMutex");
-      let _handle = CreateMutexW(None, true, mutex_name);
-      if GetLastError() == ERROR_ALREADY_EXISTS {
-          return; 
-      }
-  }
 
+  fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
-    .plugin(tauri_plugin_clipboard_manager::init()) // 修复: 注册剪贴板插件
+    .plugin(tauri_plugin_clipboard_manager::init())
+    // [新增] 单实例插件：检测到重复启动时，唤醒已存在的窗口
+    .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(win) = app.get_webview_window("main") {
+            // 执行与托盘双击完全一致的“强制显示”逻辑
+            let _ = win.emit("pip-wake", ());
+            let _ = win.set_skip_taskbar(false);
+            if win.is_minimized().unwrap_or(false) {
+                let _ = win.unminimize();
+            }
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }))
     .manage(WindowState {
       is_topmost: Mutex::new(false),
     })
-    // [修复] 监听窗口销毁事件，防止 WGC 会话残留导致的内存泄漏
     .on_window_event(|window, event| {
         if let tauri::WindowEvent::Destroyed = event {
             let label = window.label().to_string();
@@ -1430,8 +1458,7 @@ fn main() {
         }
     })
     .setup(|app| {
-        // --- 托盘初始化逻辑 (Fix 10) ---
-        // 启动时清理临时文件 (Fix 8)
+        // --- 托盘初始化逻辑 ---
         clean_temp_images();
 
         let show_i = MenuItem::with_id(app, "show", "显示界面 (Show)", true, None::<&str>)?;
@@ -1463,15 +1490,21 @@ fn main() {
                 _ => {}
             })
             .on_tray_icon_event(|tray, event| {
-                if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
-                    let app = tray.app_handle();
-                    if let Some(win) = app.get_webview_window("main") {
-                        if win.is_visible().unwrap_or(false) && win.is_minimized().unwrap_or(false) == false {
-                            let _ = win.minimize();
-                        } else {
+                let app = tray.app_handle();
+                if let Some(win) = app.get_webview_window("main") {
+                    match event {
+                        // 左键单击 OR 双击：统一执行“强制显示”逻辑
+                        TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } 
+                        | TrayIconEvent::DoubleClick { button: tauri::tray::MouseButton::Left, .. } => {
+                            let _ = win.emit("pip-wake", ());
+                            let _ = win.set_skip_taskbar(false);
+                            if win.is_minimized().unwrap_or(false) {
+                                let _ = win.unminimize();
+                            }
                             let _ = win.show();
                             let _ = win.set_focus();
                         }
+                        _ => {}
                     }
                 }
             })
@@ -1518,17 +1551,18 @@ fn main() {
         wgc::pause_wgc_session,
         wgc::resume_wgc_session,
         wgc::update_wgc_filter,
-        wgc::update_wgc_mirror, // 注册镜像命令
-        // 确保这两个只在这里出现一次
+        wgc::update_wgc_mirror,
         ensure_window_clickable,
         log_window_style,
         force_window_clickable,
         get_app_windows_tree,
         save_temp_image,
         clean_temp_images,
-        read_image_as_base64, // 新增
+        read_image_as_base64,
         save_clipboard_to_temp,
-        set_hotkey_recording_status // 新增
+        set_hotkey_recording_status,
+        save_config_file, // 本地保存
+        load_config_file  // 本地读取
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
