@@ -39,7 +39,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow, GetWindowThreadProcessId, EnumWindows, IsWindowVisible, GetWindowTextLengthW, IsIconic};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
-use windows::Win32::Foundation::{RECT, HINSTANCE};
+use windows::Win32::Foundation::{RECT, HINSTANCE, GetLastError, ERROR_ALREADY_EXISTS}; // [修复] 添加 GetLastError
+use windows::Win32::System::Threading::CreateMutexW; // [修复] 添加 CreateMutexW
 use windows::core::{w, PCWSTR}; 
 use std::sync::atomic::{AtomicI32, AtomicBool, Ordering};
 use std::time::Duration;
@@ -1402,6 +1403,16 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
 }
 
 fn main() {
+  // [修复] 单实例锁 (Single Instance Lock)
+  // 如果检测到互斥体已存在，说明已有实例运行，直接退出
+  unsafe {
+      let mutex_name = w!("Global\\ColoriAppInstanceMutex");
+      let _handle = CreateMutexW(None, true, mutex_name);
+      if GetLastError() == ERROR_ALREADY_EXISTS {
+          return; 
+      }
+  }
+
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_clipboard_manager::init()) // 修复: 注册剪贴板插件

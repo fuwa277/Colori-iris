@@ -243,7 +243,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.0 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.1 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

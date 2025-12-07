@@ -169,7 +169,7 @@ export default function App() {
       hotkeySyncApp: '', 
       hotkeySyncKey: 'Shift+F12', // 默认触发键
       hotkeySyncPickKey: 'Shift+I', // 默认取色键
-      aiFilter: true, feedTags: '高级感', topmost: false, grayMode: 'system'
+      aiFilter: true, feedTags: '高级感', topmost: false, grayMode: 'custom'
   }));
   const [runningApps, setRunningApps] = useState([]); 
   const [monitorPos, setMonitorPos] = useState(null); 
@@ -253,6 +253,9 @@ export default function App() {
 
       const unlisten = listen('global-hotkey', async (e) => {
           if (e.payload === 'gray') {
+              // [修复] 更新时间锁，防止轮询器在系统响应前覆盖状态
+              lastGrayToggleRef.current = Date.now();
+              
               if (settings.grayMode === 'system') {
                   invoke('trigger_system_grayscale');
                   setIsGrayscale(p => !p);
@@ -372,31 +375,15 @@ export default function App() {
       // 匹配逻辑
       const match = (settingKey) => settingKey && settingKey.toUpperCase() === currentCombo;
 
+      // [修复] 移除前端重复监听，统一由后端 global-hotkey 事件触发，防止聚焦时双重切换
       if (match(settings.hotkeyGray)) {
-          if (settings.grayMode === 'system') {
-              invoke('trigger_system_grayscale');
-              // 乐观更新 UI，随后 polling 会校准
-              setIsGrayscale(prev => !prev);
-          }
-          else setIsGrayscale(prev => !prev);
+          e.preventDefault(); // 仅阻止默认行为（如网页内搜索等），不执行逻辑
       }
       if (match(settings.hotkeyPick)) {
-        e.preventDefault();
-        // 确保 EyeDropper 存在且没有正在进行
-        if (window.EyeDropper && !window._isPicking) {
-           window._isPicking = true;
-           setMonitorPos(null); 
-           try { 
-               const res = await new window.EyeDropper().open(); 
-               const c = hexToRgb(res.sRGBHex); 
-               if(c) handleRgbChange(c); 
-           } catch(err) {}
-           window._isPicking = false;
-        }
+          e.preventDefault();
       }
       if (match(settings.hotkeyMonitor)) {
           e.preventDefault();
-          if (monitorPos) setMonitorPos(null); else setIsPickingPixel(true); 
       }
     };
     window.addEventListener('keydown', handleKey);

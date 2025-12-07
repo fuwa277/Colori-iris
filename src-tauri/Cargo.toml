@@ -33,11 +33,12 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_WinRT",
-    "Win32_System_WinRT_Graphics",         # 基础 WinRT Graphics
-    "Win32_System_WinRT_Graphics_Capture", # 关键修复：WGC 互操作支持
-    "Win32_System_WinRT_Direct3D11",       # 关键修复：D3D11 互操作支持
-    "Win32_System_SystemInformation",      # [修复] 添加系统信息获取支持
+    "Win32_System_WinRT_Graphics",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_SystemInformation",
     "Win32_System_Com",
+    "Win32_Security",                      # [新增] 必须添加此特性以支持 CreateMutexW
     "Graphics_Capture",
     "Graphics_DirectX_Direct3D11",
     "Foundation_Numerics",
