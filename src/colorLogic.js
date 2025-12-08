@@ -18,14 +18,20 @@ export const toLinear = (v) => Math.pow(v, 2.2);
 export const toGamma = (v) => Math.pow(v, 1 / 2.2);
 
 // Rec. 601 Luma (0-1)
-export const getLuminance = (r, g, b, alg = 'rec601') => {
+export const getLuminance = (r, g, b, alg = 'rec601', useGamma = true) => {
   // 鲁棒性修复：确保 coeffs 存在且包含 r,g,b
   let coeffs = LUMA_ALGORITHMS[alg];
   if (!coeffs || typeof coeffs.r !== 'number') coeffs = LUMA_ALGORITHMS['rec601'];
   
-  const R = toLinear(r / 255);
-  const G = toLinear(g / 255);
-  const B = toLinear(b / 255);
+  const R_norm = r / 255;
+  const G_norm = g / 255;
+  const B_norm = b / 255;
+
+  // [修改] 根据 useGamma 决定是否进行线性化 (Gamma 2.2)
+  const R = useGamma ? toLinear(R_norm) : R_norm;
+  const G = useGamma ? toLinear(G_norm) : G_norm;
+  const B = useGamma ? toLinear(B_norm) : B_norm;
+
   return coeffs.r * R + coeffs.g * G + coeffs.b * B;
 };
 

@@ -888,40 +888,14 @@ fn update_sync_coords(x: i32, y: i32) {
 
 #[tauri::command]
 fn set_sync_hotkey(key_combo: String) {
-    let parts: Vec<&str> = key_combo.split('+').collect();
-    let mut mods = 0;
-    let mut code = 0;
-
-    for part in parts {
-        match part.to_uppercase().as_str() {
-            "CTRL" | "CONTROL" => mods |= 1,
-            "SHIFT" => mods |= 2,
-            "ALT" | "OPTION" => mods |= 4,
-            "SPACE" => code = 0x20, // 修复: 添加空格键支持
-            "XBUTTON1" | "MOUSE4" => code = VK_XBUTTON1.0 as i32,
-            "XBUTTON2" | "MOUSE5" => code = VK_XBUTTON2.0 as i32,
-            s if s.starts_with('F') && s.len() > 1 => {
-                if let Ok(n) = s[1..].parse::<i32>() {
-                    if n >= 1 && n <= 12 { code = 0x6F + n; }
-                }
-            },
-            s => {
-                // 处理普通字符 A-Z, 0-9
-                if let Some(ch) = s.chars().next() {
-                    // 对于数字键，ASCII '0' 是 48 (0x30)
-                    // 对于字母，ASCII 'A' 是 65 (0x41)
-                    // 这些正好对应 Windows VK Code
-                    code = ch.to_ascii_uppercase() as i32;
-                }
-            }
-        }
-    }
+    // 复用 parse_hotkey 逻辑，统一所有快捷键解析行为
+    let (code, mods) = parse_hotkey(&key_combo);
     
-    // 如果没有识别到主键(比如只按了Ctrl)，则不设置
+    // 如果没有识别到主键(code=0)，则不设置
     if code != 0 {
         SYNC_HOTKEY.store(code, Ordering::Relaxed);
         SYNC_MODS.store(mods, Ordering::Relaxed);
-        log_to_file(format!("Hotkey Updated: VK={} Mods={}", code, mods));
+        log_to_file(format!("Hotkey Updated: VK={} Mods={} (Combo: {})", code, mods, key_combo));
     }
 }
 
@@ -933,20 +907,90 @@ fn set_sync_pick_key(key_char: String) {
 }
 
 fn parse_hotkey(combo: &str) -> (i32, i32) {
-    let parts: Vec<&str> = combo.split('+').collect();
+    // [修复] 预处理 NUM+，防止被 split('+') 错误分割
+    // 将 "NUM+" 替换为 "NUMADD" (后端已支持 NUMADD 的键值映射)
+    let combo_fixed = combo.replace("NUM+", "NUMADD");
+    let parts: Vec<&str> = combo_fixed.split('+').collect();
     let mut mods = 0;
     let mut code = 0;
+    
     for part in parts {
-        match part.to_uppercase().as_str() {
+        let p_upper = part.to_uppercase();
+        match p_upper.as_str() {
+            // 修饰键
             "CTRL" | "CONTROL" => mods |= 1,
             "SHIFT" => mods |= 2,
             "ALT" | "OPTION" => mods |= 4,
-            "WIN" | "META" | "CMD" | "COMMAND" => mods |= 8, // 增加 Win 键支持
+            "WIN" | "META" | "CMD" | "COMMAND" => mods |= 8,
+            
+            // 特殊功能键
             "SPACE" => code = 0x20,
+            "ENTER" | "RETURN" => code = 0x0D,
+            "TAB" => code = 0x09,
+            "ESC" | "ESCAPE" => code = 0x1B,
+            "BACKSPACE" => code = 0x08,
+            "UP" | "↑" => code = 0x26,
+            "DOWN" | "↓" => code = 0x28,
+            "LEFT" | "←" => code = 0x25,
+            "RIGHT" | "→" => code = 0x27,
+            "INS" | "INSERT" => code = 0x2D,
+            "DEL" | "DELETE" => code = 0x2E,
+            "HOME" => code = 0x24,
+            "END" => code = 0x23,
+            "PGUP" | "PAGEUP" => code = 0x21,
+            "PGDN" | "PAGEDOWN" => code = 0x22,
+
+            // 符号键 (关键修复: 映射到正确的 VK Code)
+            "-" | "MINUS" => code = 0xBD, // VK_OEM_MINUS
+            "=" | "EQUAL" => code = 0xBB, // VK_OEM_PLUS
+            "," | "COMMA" => code = 0xBC,
+            "." | "PERIOD" => code = 0xBE,
+            ";" | "SEMICOLON" => code = 0xBA,
+            "/" | "SLASH" => code = 0xBF,
+            "`" | "GRAVE" => code = 0xC0,
+            "[" | "BRACKETLEFT" => code = 0xDB,
+            "]" | "BRACKETRIGHT" => code = 0xDD,
+            "\\" | "BACKSLASH" => code = 0xDC,
+            "'" | "QUOTE" => code = 0xDE,
+
+            // 小键盘数字与符号 (关键修复: 支持 NUM 前缀)
+            s if s.starts_with("NUM") => {
+                match s {
+                    "NUM0" => code = 0x60, // VK_NUMPAD0
+                    "NUM1" => code = 0x61,
+                    "NUM2" => code = 0x62,
+                    "NUM3" => code = 0x63,
+                    "NUM4" => code = 0x64,
+                    "NUM5" => code = 0x65,
+                    "NUM6" => code = 0x66,
+                    "NUM7" => code = 0x67,
+                    "NUM8" => code = 0x68,
+                    "NUM9" => code = 0x69,
+                    "NUM*" | "NUMMULTIPLY" => code = 0x6A,
+                    "NUM+" | "NUMADD" => code = 0x6B,
+                    "NUM-" | "NUMSUBTRACT" => code = 0x6D,
+                    "NUM." | "NUMDECIMAL" => code = 0x6E,
+                    "NUM/" | "NUMDIVIDE" => code = 0x6F,
+                    _ => {}
+                }
+            },
+
+            // F1 - F12
             s if s.starts_with('F') && s.len() > 1 => {
                 if let Ok(n) = s[1..].parse::<i32>() { if n >= 1 && n <= 12 { code = 0x6F + n; } }
             },
-            s => { if let Some(ch) = s.chars().next() { code = ch.to_ascii_uppercase() as i32; } }
+
+            // 普通字母数字 A-Z, 0-9 (修复: 必须确保字符串长度为1，防止 "CAPSLOCK" 被解析为 'C')
+            s if s.len() == 1 => {
+                if let Some(ch) = s.chars().next() {
+                    let c_val = ch as i32;
+                    // 0-9 (ASCII 48-57) 和 A-Z (ASCII 65-90) 直接对应 Windows VK
+                    if (c_val >= 48 && c_val <= 57) || (c_val >= 65 && c_val <= 90) {
+                        code = c_val;
+                    }
+                }
+            }
+            _ => {} // [修复] 添加默认分支处理未匹配的按键字符串
         }
     }
     (code, mods)
@@ -1310,6 +1354,14 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
             flags |= KEYEVENTF_SCANCODE;
 
+            // [修复] 扩展键标志 (解决方向键变数字键的问题)
+            // 范围: PageUp(21)..Down(28), Insert(2D), Delete(2E), Divide(6F), NumEnter(在VK中通常与MainEnter共用但需区分)
+            // 简单起见，覆盖常用导航键
+            if (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E {
+                use windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_EXTENDEDKEY;
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+
             let input = INPUT {
                 r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
@@ -1325,15 +1377,49 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
         }
 
-        // --- 内部函数：解析按键 ---
+        // --- 内部函数：解析按键 (完全体) ---
         fn get_vk_code(key: &str) -> Option<u16> {
-            match key.to_uppercase().as_str() {
-                "SHIFT" => Some(0x10), "CTRL" | "CONTROL" => Some(0x11), "ALT" | "OPTION" => Some(0x12), "SPACE" => Some(0x20),
+            let k_upper = key.to_uppercase();
+            match k_upper.as_str() {
+                // 修饰键 & 常用功能键
+                "SHIFT" => Some(0x10), "CTRL" | "CONTROL" => Some(0x11), "ALT" | "OPTION" => Some(0x12), 
+                "WIN" | "META" => Some(0x5B), "SPACE" => Some(0x20), 
+                "ENTER" | "RETURN" => Some(0x0D), "TAB" => Some(0x09), "ESC" | "ESCAPE" => Some(0x1B),
+                "BACKSPACE" => Some(0x08),
+
+                // 方向键 (本次补全)
+                "UP" | "↑" => Some(0x26), "DOWN" | "↓" => Some(0x28),
+                "LEFT" | "←" => Some(0x25), "RIGHT" | "→" => Some(0x27),
+
+                // 导航键 (本次补全)
+                "INS" | "INSERT" => Some(0x2D), "DEL" | "DELETE" => Some(0x2E),
+                "HOME" => Some(0x24), "END" => Some(0x23),
+                "PGUP" | "PAGEUP" => Some(0x21), "PGDN" | "PAGEDOWN" => Some(0x22),
+
+                // 符号键
+                "-" | "MINUS" => Some(0xBD), "=" | "EQUAL" => Some(0xBB),
+                "," | "COMMA" => Some(0xBC), "." | "PERIOD" => Some(0xBE),
+                ";" | "SEMICOLON" => Some(0xBA), "/" | "SLASH" => Some(0xBF),
+                "`" | "GRAVE" => Some(0xC0), "[" | "BRACKETLEFT" => Some(0xDB),
+                "]" | "BRACKETRIGHT" => Some(0xDD), "\\" | "BACKSLASH" => Some(0xDC),
+                "'" | "QUOTE" => Some(0xDE),
+
+                // 小键盘
+                "NUM0" => Some(0x60), "NUM1" => Some(0x61), "NUM2" => Some(0x62),
+                "NUM3" => Some(0x63), "NUM4" => Some(0x64), "NUM5" => Some(0x65),
+                "NUM6" => Some(0x66), "NUM7" => Some(0x67), "NUM8" => Some(0x68), "NUM9" => Some(0x69),
+                "NUM*" | "NUMMULTIPLY" => Some(0x6A), "NUM+" | "NUMADD" => Some(0x6B),
+                "NUM-" | "NUMSUBTRACT" => Some(0x6D), "NUM." | "NUMDECIMAL" => Some(0x6E),
+                "NUM/" | "NUMDIVIDE" => Some(0x6F),
+
+                // F键
+                s if s.starts_with('F') => if let Ok(n) = s[1..].parse::<u16>() { if n >= 1 && n <= 12 { Some(0x6F + n) } else { None } } else { None },
+                
+                // 普通字母数字 (增加长度校验，防止 CAPSLOCK 被误判为 C)
                 s if s.len() == 1 => {
                     let c = s.chars().next().unwrap();
                     if c >= 'A' && c <= 'Z' { Some(c as u16) } else if c >= '0' && c <= '9' { Some(c as u16) } else { None }
                 },
-                s if s.starts_with('F') => if let Ok(n) = s[1..].parse::<u16>() { if n >= 1 && n <= 12 { Some(0x6F + n) } else { None } } else { None },
                 _ => None
             }
         }
@@ -1349,6 +1435,22 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             // 2. 获取鼠标位置
             let mut original_pos = POINT::default();
             let _ = GetCursorPos(&mut original_pos);
+
+            // [修复] 修饰键净化：检测并临时释放 Ctrl/Shift/Alt/Win
+            // 防止用户按住 Ctrl 触发宏时，发送的 'B' 变成了 'Ctrl+B'
+            let mut mods_to_restore = Vec::new();
+            if (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 { 
+                send_key(VK_SHIFT.0, true); mods_to_restore.push(VK_SHIFT.0); 
+            }
+            if (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 { 
+                send_key(VK_CONTROL.0, true); mods_to_restore.push(VK_CONTROL.0); 
+            }
+            if (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0 { 
+                send_key(VK_MENU.0, true); mods_to_restore.push(VK_MENU.0); 
+            }
+            if (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0 { // VK_LWIN
+                send_key(0x5B, true); mods_to_restore.push(0x5B); 
+            }
             
             // --- 步骤 1: 显示色块 (立即执行) ---
             // 放大尺寸到 20x20，并居中于鼠标
@@ -1367,7 +1469,9 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             thread::sleep(Duration::from_millis(50));
 
             // --- 步骤 2: 触发取色 (按键) ---
-            let parts: Vec<&str> = pick_key_str.split('+').collect();
+            // [修复] 预处理 NUM+，防止被 split('+') 错误分割成 ["NUM", ""]
+            let pick_key_fixed = pick_key_str.replace("NUM+", "NUMADD"); 
+            let parts: Vec<&str> = pick_key_fixed.split('+').collect();
             let mut keys_to_release = Vec::new();
 
             for part in &parts {
@@ -1416,6 +1520,11 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             // --- 步骤 5: 隐藏色块 ---
             let _ = ShowWindow(spot_hwnd, SW_HIDE);
             
+            // [修复] 恢复之前按下的修饰键
+            for vk in mods_to_restore {
+                send_key(vk, false); // Press down
+            }
+
             // 归还焦点
             let safe_target_hwnd = HWND(target_hwnd_val as *mut _);
             if safe_target_hwnd.0 != std::ptr::null_mut() {

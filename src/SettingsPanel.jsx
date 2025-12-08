@@ -66,7 +66,7 @@ export const SettingsPanel = ({
                     </button>
                 </div>
                 <div className="mt-2 text-[9px] opacity-40">
-                    {settings.grayMode==='custom' ? t('使用 Windows Magnification API 应用全屏灰度算法 (修复偏色需重启)', 'Uses Windows Mag API (Fix color drift by restart)') : t('触发 Windows 系统级快捷键 (Win+Ctrl+C)', 'Triggers Windows system shortcut')}
+                    {settings.grayMode==='custom' ? t('(推荐)使用 Windows Magnification API 全屏灰度算法', '(Rec.)Uses Windows Mag API (Fix color drift by restart)') : t('触发 Windows 系统级快捷键 (Win+Ctrl+C)', 'Triggers Windows system shortcut')}
                 </div>
             </div>
 
@@ -243,7 +243,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.2 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.3 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

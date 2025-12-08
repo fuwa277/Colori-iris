@@ -656,8 +656,6 @@ export const ReferenceWindow = () => {
                     <div className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(2);}} />
                     <div className="absolute top-0 left-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(8);}} />
                     <div className="absolute top-0 right-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(4);}} />
-                    <div className="absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-50 bg-white/10 hover:bg-slate-500 rounded-tl clip-triangle pointer-events-auto"
-                        onMouseDown={(e) => { e.stopPropagation(); appWindow.startResizeDragging(6); }} />
                 </>
             )}
             

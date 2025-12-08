@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, emit } from '@tauri-apps/api/event';
-import { Triangle, Grid, Copy, Eye, Pipette, Image as ImageIcon, Maximize2, Minimize2, Layers, Monitor, Crop, X, RefreshCw } from 'lucide-react';
+import { Triangle, Grid, Copy, Eye, Pipette, Image as ImageIcon, Maximize2, Minimize2, Layers, Monitor, Crop, X, RefreshCw, AlertCircle } from 'lucide-react';
 import { 
     LUMA_ALGORITHMS, getLuminance, hsvToRgb, rgbToHex, hexToRgb, rgbToHsv, 
     toGamma, rgbToCmyk, cmykToRgb, rgbToLab, culoriRgb, culoriCmyk 
@@ -43,22 +44,52 @@ export const HotkeyRecorder = ({ value, onChange, placeholder, isDark, uniqueKey
         if (e.shiftKey) keys.push('Shift');
         if (e.altKey) keys.push('Alt');
         
-        let key = e.key.toUpperCase();
-        const ignore = ['CONTROL','SHIFT','ALT','META'];
-        if (ignore.includes(key)) return; // 仅按修饰键不结束录制
+        // 获取原始 Code 用于判断位置
+        const code = e.code;
+        let keyLabel = e.key.toUpperCase();
+
+        // [修复] 添加 NUMLOCK 到忽略列表
+        const ignore = ['CONTROL','SHIFT','ALT','META', 'NUMLOCK'];
+        if (ignore.includes(keyLabel)) return; 
         
-        if (key === 'ESCAPE' || key === 'DELETE' || key === 'BACKSPACE') {
-            stopRecording(''); // 使用封装的停止函数
+        if (keyLabel === 'ESCAPE' || keyLabel === 'DELETE' || keyLabel === 'BACKSPACE') {
+            stopRecording(''); 
             return;
         }
 
-        const map = { ' ': 'SPACE', 'ARROWUP': '↑', 'ARROWDOWN': '↓', 'ARROWLEFT': '←', 'ARROWRIGHT': '→' };
-        key = map[key] || key;
+        // --- 增强按键映射逻辑 ---
+        // 1. 处理小键盘 (Location 3)
+        if (e.location === 3) {
+            const numMap = {
+                'Numpad0': 'NUM0', 'Numpad1': 'NUM1', 'Numpad2': 'NUM2', 
+                'Numpad3': 'NUM3', 'Numpad4': 'NUM4', 'Numpad5': 'NUM5',
+                'Numpad6': 'NUM6', 'Numpad7': 'NUM7', 'Numpad8': 'NUM8', 'Numpad9': 'NUM9',
+                'NumpadAdd': 'NUM+', 'NumpadSubtract': 'NUM-', 'NumpadMultiply': 'NUM*', 
+                'NumpadDivide': 'NUM/', 'NumpadDecimal': 'NUM.', 'NumpadEnter': 'ENTER'
+            };
+            if (numMap[code]) keyLabel = numMap[code];
+        } else {
+            // 2. 处理主键盘符号 (解决 - = [ ] 等符号识别问题)
+            // 使用 code 映射可以避免输入法影响，且方便后端统一处理
+            const symbolMap = {
+                'Minus': '-', 'Equal': '=', 
+                'BracketLeft': '[', 'BracketRight': ']', 
+                'Backslash': '\\', 'Semicolon': ';', 
+                'Quote': "'", 'Comma': ',', 'Period': '.', 'Slash': '/', 'Grave': '`'
+            };
+            
+            if (symbolMap[code]) {
+                keyLabel = symbolMap[code];
+            } else {
+                // 常规映射
+                const map = { ' ': 'SPACE', 'ARROWUP': '↑', 'ARROWDOWN': '↓', 'ARROWLEFT': '←', 'ARROWRIGHT': '→' };
+                keyLabel = map[keyLabel] || keyLabel;
+            }
+        }
 
-        keys.push(key);
+        keys.push(keyLabel);
         
-        // 结束录制
-        stopRecording(keys.join('+')); // 使用封装的停止函数
+        stopRecording(keys.join('+')); 
     };
 
     // 右键清除
@@ -371,19 +402,66 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
   );
 };
 
-// --- 等亮度图表 ---
-export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, onPickColor, alg = 'rec601' }) => {
+// --- 等亮度图表 (修复版) ---
+export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, value, onPickColor, alg = 'rec601', lang, useGamma, setUseGamma }) => {
+  const t = (zh, en) => lang === 'zh' ? zh : en; 
   const canvasRef = useRef(null);
   const [crosshair, setCrosshair] = useState(null);
+  // const [useGamma, setUseGamma] = useState(true); // 已移交父组件管理
+
+  // [新增] 自适应 Tooltip 状态
+  const [showTip, setShowTip] = useState(false);
+  const [tipPos, setTipPos] = useState({ top: 0, left: 0, goUp: false });
+  const tipTriggerRef = useRef(null);
+
+  // [修改] 智能计算位置函数
+  const handleTipEnter = () => {
+      if (tipTriggerRef.current) {
+          const rect = tipTriggerRef.current.getBoundingClientRect();
+          const winW = window.innerWidth;
+          const winH = window.innerHeight;
+          const tooltipWidth = 260; // 对应 w-64 (256px) + 少量余量
+
+          // 1. 垂直方向判断：如果下方空间小于 180px，则向上弹出
+          const spaceBottom = winH - rect.bottom;
+          const goUp = spaceBottom < 180; 
+
+          // 2. 水平方向判断：优先居中对齐，然后强制限制在屏幕内
+          // 初步计算居中位置
+          let left = rect.left + rect.width / 2 - tooltipWidth / 2;
+          
+          // 左边界限制 (至少留 8px)
+          if (left < 8) left = 8;
+          // 右边界限制
+          if (left + tooltipWidth > winW - 8) left = winW - tooltipWidth - 8;
+
+          setTipPos({ 
+              // goUp时：显示在元素顶部上方 8px；否则显示在底部下方 8px
+              top: goUp ? rect.top - 8 : rect.bottom + 8, 
+              left: left, 
+              goUp 
+          });
+          setShowTip(true);
+      }
+  };
+
+  // [新增] 本地计算有效目标亮度
+  // 如果组件内关闭了 Gamma，需要根据当前的 H/S/V 重新计算一个不带 Gamma 的亮度作为目标，
+  // 否则会使用 App 传入的带 Gamma 的 targetLuminance，导致错位。
+  const effectiveTargetLuminance = React.useMemo(() => {
+      if (value !== undefined) {
+          const rgb = hsvToRgb(hue, saturation, value);
+          return getLuminance(rgb.r, rgb.g, rgb.b, alg, useGamma);
+      }
+      return targetLuminance;
+  }, [hue, saturation, value, alg, useGamma, targetLuminance]);
 
   const drawMarker = useCallback((ctx, w, h) => {
       const x = (hue / 360) * w;
       const y = h - (saturation / 100) * h;
-      ctx.strokeStyle = 'white';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'white'; ctx.lineWidth = 1.5;
       ctx.strokeRect(x - 2.5, y - 2.5, 5, 5);
-      ctx.shadowColor = 'black';
-      ctx.shadowBlur = 2;
+      ctx.shadowColor = 'black'; ctx.shadowBlur = 2;
       ctx.strokeRect(x - 2.5, y - 2.5, 5, 5);
       ctx.shadowBlur = 0;
   }, [hue, saturation]);
@@ -392,25 +470,20 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, onPickColo
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const w = canvas.width;
-    const h = canvas.height;
-    
+    const w = canvas.width; const h = canvas.height;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,0,w,h); 
-
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
-
     for (let x = 0; x < w; x++) {
       const hVal = (x / w) * 360;
       for (let y = 0; y < h; y++) {
         const sVal = 1 - (y / h); 
         const rgbMax = hsvToRgb(hVal, sVal * 100, 100);
-        const lMax = getLuminance(rgbMax.r, rgbMax.g, rgbMax.b, alg);
-
-        if (lMax >= targetLuminance * 0.99) {
-           const ratio = targetLuminance / (lMax + 0.0001);
-           const vDec = Math.pow(ratio, 1/2.2);
+        const lMax = getLuminance(rgbMax.r, rgbMax.g, rgbMax.b, alg, useGamma);
+        if (lMax >= effectiveTargetLuminance * 0.99) {
+           const ratio = effectiveTargetLuminance / (lMax + 0.0001);
+           const vDec = useGamma ? Math.pow(ratio, 1/2.2) : ratio;
            const finalV = Math.min(100, vDec * 100);
            const c = hsvToRgb(hVal, sVal * 100, finalV);
            const idx = (y * w + x) * 4;
@@ -429,7 +502,7 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, onPickColo
         ctx.setLineDash([]);
     }
     drawMarker(ctx, w, h);
-  }, [targetLuminance, crosshair, drawMarker, alg]);
+  }, [effectiveTargetLuminance, crosshair, drawMarker, alg, useGamma]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -444,21 +517,16 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, onPickColo
       const safeX = Math.max(0, Math.min(x, canvas.width));
       const safeY = Math.max(0, Math.min(y, canvas.height));
       setCrosshair({x: safeX, y: safeY});
-
-      const w = canvas.width;
-      const h = canvas.height;
+      const w = canvas.width; const h = canvas.height;
       const hVal = (safeX / w) * 360;
       const sVal = (1 - safeY/h); 
       const rgbMax = hsvToRgb(hVal, sVal * 100, 100);
-      const lMax = getLuminance(rgbMax.r, rgbMax.g, rgbMax.b, alg);
-      
-      if (lMax >= targetLuminance * 0.99) {
-          const ratio = targetLuminance / (lMax + 0.0001);
-          const vDec = Math.pow(ratio, 1/2.2);
+      const lMax = getLuminance(rgbMax.r, rgbMax.g, rgbMax.b, alg, useGamma);
+      if (lMax >= effectiveTargetLuminance * 0.99) {
+          const ratio = effectiveTargetLuminance / (lMax + 0.0001);
+          const vDec = useGamma ? Math.pow(ratio, 1/2.2) : ratio;
           const finalV = Math.min(100, vDec * 100);
-          if (e.buttons === 1) { 
-            onPickColor({ h: hVal, s: sVal*100, v: finalV });
-          }
+          if (e.buttons === 1) { onPickColor({ h: hVal, s: sVal*100, v: finalV }); }
       }
   };
 
@@ -472,8 +540,54 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, onPickColo
          onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)}
          onPointerLeave={() => setCrosshair(null)}
        />
-       <div className="flex justify-between text-[10px] opacity-40 px-1 mt-1 font-mono">
-           <span>Hue</span><span>Sat</span>
+       
+       {/* 底部控制栏 */}
+       <div className="flex justify-end items-center mt-1 px-1">
+           <div className="flex items-center gap-2">
+               {/* 1. 说明按钮 (放在左侧) */}
+               <div 
+                   ref={tipTriggerRef}
+                   onMouseEnter={handleTipEnter}
+                   onMouseLeave={() => setShowTip(false)}
+                   className="flex items-center cursor-help text-gray-500 hover:text-gray-300 transition-colors p-1"
+               >
+                   <AlertCircle size={10} />
+               </div>
+
+               {/* 2. Gamma 开关 (放在右侧) */}
+               <button 
+                 onClick={() => setUseGamma(!useGamma)}
+                 className={`flex items-center gap-1.5 text-[9px] px-1.5 py-0.5 rounded transition-colors ${useGamma ? 'bg-teal-500/10 text-teal-500 border border-teal-500/30' : 'bg-white/5 text-gray-500 border border-transparent hover:text-gray-300'}`}
+                 title={useGamma ? t("Gamma 校正: 开启", "Gamma: ON") : t("Gamma 校正: 关闭", "Gamma: OFF ")}
+               >
+                   <div className={`w-1.5 h-1.5 rounded-full ${useGamma ? 'bg-teal-500 shadow-[0_0_4px_rgba(20,184,166,0.6)]' : 'bg-gray-600'}`} />
+                   <span>Gamma 2.2</span>
+               </button>
+           </div>
+
+           {/* 3. Portal 渲染浮层 (自适应位置 + 不被遮挡) */}
+           {showTip && createPortal(
+               <div 
+                   className="fixed z-[9999] w-64 p-3 bg-[#1a1a1a] text-gray-200 text-[11px] rounded-lg border border-white/10 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-100 pointer-events-none"
+                   style={{ 
+                       // 使用 JS 计算出的绝对坐标
+                       top: tipPos.top, 
+                       left: tipPos.left, 
+                       // 仅在垂直方向使用 transform，避免水平偏移造成问题
+                       transform: `translateY(${tipPos.goUp ? '-100%' : '0'})` 
+                   }}
+               >
+                   <p className="mb-2 leading-relaxed">
+                       <span className="text-teal-400 font-bold">{t("开启", "ON")}</span>：
+                       {t("(推荐)模拟人眼物理亮度 (Rec.601标准)，色彩过渡更自然，但会与灰度滤镜产生一些差别。", "(Rec.)Physically accurate luminance (Rec.601). More natural gradients, but differs slightly from simple grayscale filters.")}
+                   </p>
+                   <p className="leading-relaxed">
+                       <span className="text-gray-400 font-bold">{t("关闭", "OFF")}</span>：
+                       {t("直接计算数值亮度 (所见即所得)，适合匹配无色彩管理的绘图软件，与灰度滤镜算法一致。", "Raw numerical brightness (WYSIWYG). Matches paint software without color management. Consistent with grayscale filter.")}
+                   </p>
+               </div>,
+               document.body
+           )}
        </div>
     </div>
   );

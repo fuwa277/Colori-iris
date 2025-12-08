@@ -169,6 +169,7 @@ export default function App() {
       hotkeySyncApp: '', 
       hotkeySyncKey: 'Shift+F12', // 默认触发键
       hotkeySyncPickKey: 'Shift+I', // 默认取色键
+      useGamma: true, // 默认开启 Gamma
       aiFilter: true, feedTags: '高级感', topmost: false, grayMode: 'custom'
   }));
   const [runningApps, setRunningApps] = useState([]); 
@@ -637,12 +638,26 @@ export default function App() {
                         <div className="flex-1 overflow-y-auto custom-scrollbar relative pr-1">
                             {subTab === 'sketch' && (
                                 /* 微调: -mt-[3px] 将素描图表向上移动约 3px */
-                                <div className="animate-in fade-in space-y-1 pb-0 overflow-hidden -mt-[3px]">
-                                    <div className="rounded-lg overflow-hidden border border-white/10 shadow-inner">
-                                        <IsoLuminanceGraph targetLuminance={luma} hue={hsv.h} saturation={hsv.s} onPickColor={handleColorChange} alg={iccProfile} />
+                                <div className="animate-in fade-in space-y-1 pb-0 -mt-[3px]">
+                                    <div className="rounded-lg border border-white/10 shadow-inner">
+                                        {/* [修复] 根据 settings.grayMode 动态选择算法: 系统模式维持 rec601，自定义模式跟随 active profile */}
+                                        <IsoLuminanceGraph 
+                                            targetLuminance={luma} 
+                                            hue={hsv.h} saturation={hsv.s} 
+                                            value={hsv.v} // [新增] 传递 Value 以便组件内部重算 Gamma
+                                            onPickColor={handleColorChange} 
+                                            alg={settings.grayMode === 'system' ? 'rec601' : iccProfile}
+                                            lang={lang}
+                                            useGamma={settings.useGamma ?? true}
+                                            setUseGamma={(val) => setSettings(s => ({...s, useGamma: val}))}
+                                        />
                                     </div>
                                     <div className="flex justify-between items-center px-1">
-                                        <span className="text-[9px] font-bold opacity-50 flex items-center gap-1 uppercase tracking-wider"><ImageIcon size={9} /> Rec.601 Luma</span>
+                                        <span className="text-[9px] font-bold opacity-50 flex items-center gap-1 uppercase tracking-wider">
+                                            <ImageIcon size={9} /> 
+                                            {/* 动态显示当前使用的算法名称 */}
+                                            {settings.grayMode === 'system' ? 'Rec.601 (System)' : (LUMA_ALGORITHMS[iccProfile]?.name || 'Custom')}
+                                        </span>
                                         <div className="flex gap-3 font-mono text-[10px]">
                                             <span>Y: <b className="text-slate-500">{luma.toFixed(2)}</b></span>
                                             <span>Gray: <b className="text-slate-500">{Math.round(toGamma(luma)*255)}</b></span>
