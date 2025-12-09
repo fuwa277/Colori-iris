@@ -6,13 +6,13 @@ use windows::{
         SizeInt32,
     },
     Win32::{
-        Foundation::{HWND, RECT}, // 移除了 BOOL, LPARAM, WPARAM
+        Foundation::{HWND, RECT, POINT}, // 移除了 BOOL, LPARAM, WPARAM
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_RENDER_TARGET,
-                D3D11_USAGE_DEFAULT, ID3D11Texture2D, ID3D11ShaderResourceView, // 移除了 D3D11_RESOURCE_MISC_FLAG
+                D3D11_USAGE_DEFAULT, ID3D11Texture2D, ID3D11ShaderResourceView, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_USAGE_STAGING, // [修复] 添加 CPU 读取相关常量
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -20,7 +20,7 @@ use windows::{
                 DXGI_SWAP_EFFECT_FLIP_DISCARD, 
                 DXGI_USAGE_RENDER_TARGET_OUTPUT, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS,
             },
-            Gdi::{MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY},
+            Gdi::{MonitorFromWindow, MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY},
         },
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
@@ -152,8 +152,15 @@ impl WgcSession {
 
         let item = if is_region {
             let hmonitor = unsafe { 
-                let base_hwnd = if target_hwnd == 0 { GetDesktopWindow() } else { HWND(target_hwnd as _) };
-                MonitorFromWindow(base_hwnd, MONITOR_DEFAULTTOPRIMARY) 
+                if let Some(rect) = self.source_rect {
+                    // 如果是区域模式，使用选区左上角坐标寻找所在的显示器
+                    let pt = POINT { x: rect.left, y: rect.top };
+                    MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+                } else {
+                    // 兜底逻辑
+                    let base_hwnd = if target_hwnd == 0 { GetDesktopWindow() } else { HWND(target_hwnd as _) };
+                    MonitorFromWindow(base_hwnd, MONITOR_DEFAULTTOPRIMARY) 
+                }
             };
             create_capture_item_for_monitor(hmonitor).map_err(|e| e.to_string())?
         } else {
@@ -332,8 +339,15 @@ impl WgcSession {
 
         let item = if is_region {
             let hmonitor = unsafe { 
-                let base_hwnd = if target_hwnd == 0 { GetDesktopWindow() } else { HWND(target_hwnd as _) };
-                MonitorFromWindow(base_hwnd, MONITOR_DEFAULTTOPRIMARY) 
+                if let Some(rect) = self.source_rect {
+                    // 如果是区域模式，使用选区左上角坐标寻找所在的显示器
+                    let pt = POINT { x: rect.left, y: rect.top };
+                    MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+                } else {
+                    // 兜底逻辑
+                    let base_hwnd = if target_hwnd == 0 { GetDesktopWindow() } else { HWND(target_hwnd as _) };
+                    MonitorFromWindow(base_hwnd, MONITOR_DEFAULTTOPRIMARY) 
+                }
             };
             create_capture_item_for_monitor(hmonitor).map_err(|e| e.to_string())?
         } else {
@@ -902,4 +916,130 @@ pub fn update_wgc_mirror(label: String, mirror: bool) {
             }
         }
     }
+}
+
+// [新增] WGC 单帧截图功能 (用于修复优动漫等软件无法预览的问题)
+pub fn capture_snapshot(hwnd_val: isize) -> Result<String, String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, D3D11_SUBRESOURCE_DATA, D3D11_MAPPED_SUBRESOURCE};
+    
+    // 1. 初始化设备
+    let (d3d_device, d3d_context) = create_d3d_device().map_err(|e| e.to_string())?;
+    let dxgi_device = d3d_device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>().map_err(|e| e.to_string())?;
+    let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_device).map_err(|e| e.to_string())? };
+    let winrt_device: IDirect3DDevice = inspectable.cast().map_err(|e| e.to_string())?;
+
+    // 2. 创建捕获项
+    let item = create_capture_item_for_window(HWND(hwnd_val as _)).map_err(|e| e.to_string())?;
+    let item_size = item.Size().map_err(|e| e.to_string())?;
+
+    // 3. 创建 FramePool
+    let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+        &winrt_device, 
+        DirectXPixelFormat::B8G8R8A8UIntNormalized, 
+        1, 
+        item_size
+    ).map_err(|e| e.to_string())?;
+
+    // 4. 创建会话
+    let session = frame_pool.CreateCaptureSession(&item).map_err(|e| e.to_string())?;
+    
+    // 5. 设置信号通道
+    let (tx, rx) = mpsc::channel();
+    
+    frame_pool.FrameArrived(&windows::Foundation::TypedEventHandler::new(
+        move |pool: &Option<Direct3D11CaptureFramePool>, _| {
+            if let Some(pool) = pool {
+                if let Ok(frame) = pool.TryGetNextFrame() {
+                    let _ = tx.send(frame);
+                }
+            }
+            Ok(())
+        }
+    )).map_err(|e| e.to_string())?;
+
+    // 6. 开始捕获并等待第一帧
+    session.StartCapture().map_err(|e| e.to_string())?;
+    
+    let frame = rx.recv_timeout(Duration::from_millis(800)).map_err(|_| "Timeout waiting for WGC frame".to_string())?;
+    
+    // 停止会话 (拿到一帧就够了)
+    let _ = session.Close();
+    let _ = frame_pool.Close();
+
+    // 7. 处理纹理数据
+    let surface = frame.Surface().map_err(|e| e.to_string())?;
+    let surface_interop = surface.cast::<IDirect3DDxgiInterfaceAccess>().map_err(|e| e.to_string())?;
+    let source_texture: ID3D11Texture2D = unsafe { surface_interop.GetInterface().map_err(|e| e.to_string())? };
+    
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { source_texture.GetDesc(&mut desc); }
+
+    // 创建 CPU 可读的 Staging Texture
+    let staging_desc = D3D11_TEXTURE2D_DESC {
+        Width: desc.Width,
+        Height: desc.Height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_STAGING, // 关键：Staging
+        BindFlags: 0,
+        CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, // 关键：CPU Read
+        MiscFlags: 0,
+    };
+
+    let mut staging_texture = None;
+    unsafe {
+        d3d_device.CreateTexture2D(&staging_desc, None, Some(&mut staging_texture)).map_err(|e| e.to_string())?;
+        if let Some(staging) = &staging_texture {
+            d3d_context.CopyResource(staging, &source_texture);
+            
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            d3d_context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| e.to_string())?;
+            
+            // 8. 转换为 PNG Base64
+            // 注意：WGC 返回的是 BGRA，但 image crate 默认处理 RGBA，我们需要手动 Swizzle 或者告诉 image 它是 BGRA
+            // 这里我们手动拷贝并交换 B 和 R
+            let width = desc.Width as usize;
+            let height = desc.Height as usize;
+            let src_stride = mapped.RowPitch as usize;
+            let src_ptr = mapped.pData as *const u8;
+            
+            let mut img_buf = Vec::with_capacity(width * height * 4);
+            
+            for y in 0..height {
+                let row_start = y * src_stride;
+                for x in 0..width {
+                    let pixel_idx = row_start + x * 4;
+                    let b = *src_ptr.add(pixel_idx);
+                    let g = *src_ptr.add(pixel_idx + 1);
+                    let r = *src_ptr.add(pixel_idx + 2);
+                    let _a = *src_ptr.add(pixel_idx + 3); // WGC alpha is typically 255 or premultiplied
+                    
+                    img_buf.push(r);
+                    img_buf.push(g);
+                    img_buf.push(b);
+                    img_buf.push(255); // 强制不透明，避免透明窗口问题
+                }
+            }
+            
+            d3d_context.Unmap(staging, 0);
+            
+            // 编码
+            let mut png_data = Vec::new();
+            let mut cursor = std::io::Cursor::new(&mut png_data);
+            let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(desc.Width, desc.Height, img_buf).ok_or("Buffer create failed")?;
+            // 缩略图不需要原图那么大，可以在这里 resize 优化性能，但为了清晰度先原样输出
+            img.write_to(&mut cursor, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+            
+            use base64::engine::general_purpose;
+            use base64::Engine;
+            let b64 = general_purpose::STANDARD.encode(png_data);
+            return Ok(format!("data:image/png;base64,{}", b64));
+        }
+    }
+
+    Err("Texture creation failed".to_string())
 }

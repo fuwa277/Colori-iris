@@ -9,7 +9,7 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::fs; // 新增
-use std::path::Path; // 新增
+// use std::path::Path; // Unused removed
 use winreg::enums::*;
 use winreg::RegKey;
 use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{POINT, HWND, LPARAM, BOOL};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
 // [修复] 引入 GetSystemMetrics 和 SM_SWAPBUTTON
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON}; 
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON, VK_CONTROL, VK_SHIFT, VK_MENU, VK_XBUTTON1, VK_XBUTTON2};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON, VK_CONTROL, VK_SHIFT, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     CreateWindowExW, SetWindowPos, 
@@ -41,8 +41,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow, GetWindowThreadProcessId, EnumWindows, IsWindowVisible, GetWindowTextLengthW, IsIconic};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
-use windows::Win32::Foundation::{RECT, HINSTANCE, GetLastError, ERROR_ALREADY_EXISTS}; // [修复] 添加 GetLastError
-use windows::Win32::System::Threading::CreateMutexW; // [修复] 添加 CreateMutexW
+use windows::Win32::Foundation::{RECT, HINSTANCE}; 
+// use windows::Win32::System::Threading::CreateMutexW; // Unused removed
 use windows::core::{w, PCWSTR}; 
 use std::sync::atomic::{AtomicI32, AtomicBool, Ordering};
 use std::time::Duration;
@@ -51,8 +51,20 @@ use std::collections::HashSet;
 use std::io::Cursor;
 use image::ImageFormat;
 use xcap::{Monitor, Window}; // 确保引入 Window
+// 确保引入 crop_imm，后续截图修复需要用到
 use image::imageops::crop_imm;
 use base64::engine::{general_purpose, Engine};
+
+// [优化] 全局内存缓存，替代磁盘IO和LocalStorage
+static PENDING_SNAPSHOT: Mutex<Option<MonitorSnapshot>> = Mutex::new(None);
+
+// 定义快照返回结构
+#[derive(serde::Serialize, Clone)] // 添加 Clone trait
+struct MonitorSnapshot {
+    data_url: String,
+    x: i32, y: i32, w: u32, h: u32,
+    scale_factor: f32,
+}
 
 mod d3d11_renderer; // 注册新渲染器
 mod wgc; // 引入 WGC 模块
@@ -78,8 +90,12 @@ static HK_PICK_CODE: AtomicI32 = AtomicI32::new(0);
 static HK_PICK_MODS: AtomicI32 = AtomicI32::new(0);
 static HK_MONI_CODE: AtomicI32 = AtomicI32::new(0);
 static HK_MONI_MODS: AtomicI32 = AtomicI32::new(0);
+static HK_REGION_CODE: AtomicI32 = AtomicI32::new(0); // [新增]
+static HK_REGION_MODS: AtomicI32 = AtomicI32::new(0);
+static HK_REF_CODE: AtomicI32 = AtomicI32::new(0);    // [新增]
+static HK_REF_MODS: AtomicI32 = AtomicI32::new(0);
 // 额外快捷键的全局开关
-static HK_GLOBAL_FLAGS: AtomicI32 = AtomicI32::new(0); // 位掩码: 1=Gray, 2=Pick, 4=Moni
+static HK_GLOBAL_FLAGS: AtomicI32 = AtomicI32::new(0); // 位掩码: 1=Gray, 2=Pick, 4=Moni, 8=Region, 16=Ref
 // 目标进程名称 (None 代表不限制)
 static TARGET_PROCESS_NAME: Mutex<Option<String>> = Mutex::new(None);
 
@@ -90,69 +106,200 @@ fn set_hotkey_recording_status(is_recording: bool) {
     // log_to_file(format!("Hotkey Recording Status: {}", is_recording));
 }
 
+// [新增] 获取当前鼠标所在显示器的完整快照 (用于高性能取色)
 #[tauri::command]
-async fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<String, String> {
-    // 1. 寻找包含选区起点的屏幕
+async fn capture_current_monitor_snapshot() -> Result<(), String> {
     let screens = Monitor::all().map_err(|e| e.to_string())?;
+    let (mx, my) = get_mouse_pos();
     
-    // 找到包含区域起点的屏幕，或者默认第一个
+    // 找到包含鼠标的显示器 (安全修复：使用 ? 抛出错误而不是 unwrap 崩溃)
     let monitor = screens.iter().find(|m| {
-        x >= m.x() && x < m.x() + m.width() as i32 &&
-        y >= m.y() && y < m.y() + m.height() as i32
-    }).unwrap_or_else(|| screens.first().ok_or("No monitor found").unwrap());
+        mx >= m.x() && mx < m.x() + m.width() as i32 &&
+        my >= m.y() && my < m.y() + m.height() as i32
+    }).or_else(|| screens.first()).ok_or("No monitor found")?;
 
-    // 2. 截取该屏幕图像数据 (物理像素)
     let image = monitor.capture_image().map_err(|e| e.to_string())?;
     
-    // 3. 计算裁剪区域相对于该屏幕的坐标
-    // start_x/y 必须是 u32
-    let start_x = (x - monitor.x()) as u32;
-    let start_y = (y - monitor.y()) as u32;
+    // [性能优化] 强制使用 BMP 格式 (无压缩，编码极快) + 内存存储
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    image.write_to(&mut cursor, ImageFormat::Bmp).map_err(|e| e.to_string())?;
+    
+    let base64_str = general_purpose::STANDARD.encode(buf);
 
-    // 4. 裁剪图像 (修复：严格边界检查防止 Panic)
+    let snapshot = MonitorSnapshot {
+        data_url: format!("data:image/bmp;base64,{}", base64_str),
+        x: monitor.x(),
+        y: monitor.y(),
+        w: monitor.width(),
+        h: monitor.height(),
+        scale_factor: monitor.scale_factor(),
+    };
+
+    // 存入全局互斥锁，等待子窗口读取
+    *PENDING_SNAPSHOT.lock().unwrap() = Some(snapshot);
+    
+    Ok(())
+}
+
+// [新增] 子窗口读取内存中的快照
+#[tauri::command]
+async fn fetch_pending_snapshot() -> Result<MonitorSnapshot, String> {
+    // 修复 warning: variable does not need to be mutable
+    let guard = PENDING_SNAPSHOT.lock().unwrap();
+    if let Some(snap) = guard.as_ref() {
+        // 返回克隆的数据，保留数据以防窗口刷新
+        Ok(snap.clone())
+    } else {
+        Err("No snapshot available".to_string())
+    }
+}
+
+// [优化] 自动将窗口移动并填满鼠标所在的显示器 (替代 setFullscreen)
+#[tauri::command]
+async fn move_window_to_cursor_monitor(app_handle: tauri::AppHandle, label: String) -> Result<f64, String> {
+    let window = app_handle.get_webview_window(&label).ok_or("Window not found")?;
+    
+    // 获取鼠标物理位置
+    let cursor_pos = app_handle.cursor_position().map_err(|e| e.to_string())?;
+    
+    // 遍历所有显示器，找到包含鼠标的那个
+    let monitors = app_handle.available_monitors().map_err(|e| e.to_string())?;
+    
+    let target_monitor = monitors.into_iter().find(|m| {
+        let pos = m.position();
+        let size = m.size();
+        cursor_pos.x >= pos.x as f64 && cursor_pos.x < (pos.x as f64 + size.width as f64) &&
+        cursor_pos.y >= pos.y as f64 && cursor_pos.y < (pos.y as f64 + size.height as f64)
+    });
+
+    if let Some(monitor) = target_monitor {
+        let pos = monitor.position();
+        let size = monitor.size();
+        
+        // 1. 移动到屏幕左上角
+        window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: pos.x, y: pos.y }))
+            .map_err(|e| e.to_string())?;
+            
+        // 2. [新增] 调整尺寸以填满该屏幕 (物理像素)
+        window.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: size.width, height: size.height }))
+            .map_err(|e| e.to_string())?;
+
+        return Ok(monitor.scale_factor());
+    }
+    
+    Ok(1.0)
+}
+
+// 修复：按坐标区域截图 (增强健壮性)
+#[tauri::command]
+async fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<String, String> {
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    
+    // 策略：智能匹配显示器 (防止因 1px 误差导致的崩溃)
+    // 1. 优先找包含"区域中心点"的屏幕
+    // 2. 其次找包含"左上角"的屏幕
+    // 3. 最后找"距离最近"的屏幕 (兜底)
+    let center_x = x + (w as i32) / 2;
+    let center_y = y + (h as i32) / 2;
+
+    let target_monitor = monitors.iter().find(|m| {
+        let mx = m.x(); let my = m.y();
+        let mw = m.width() as i32; let mh = m.height() as i32;
+        center_x >= mx && center_x < mx + mw && center_y >= my && center_y < my + mh
+    }).or_else(|| {
+        monitors.iter().find(|m| {
+            let mx = m.x(); let my = m.y();
+            let mw = m.width() as i32; let mh = m.height() as i32;
+            x >= mx && x < mx + mw && y >= my && y < my + mh
+        })
+    }).or_else(|| {
+        // 兜底：找距离 (x,y) 最近的屏幕 (安全修复：处理 monitors 为空的情况)
+        monitors.iter().min_by_key(|m| {
+            let mx = m.x(); let my = m.y();
+            (x - mx).abs() + (y - my).abs()
+        })
+    }).ok_or_else(|| "No matching monitor found".to_string())?;
+
+    // 计算相对于该显示器的局部坐标
+    let local_x_i32 = x - target_monitor.x();
+    let local_y_i32 = y - target_monitor.y();
+    
+    // 边界保护：防止负数 (虽然 find 保证了 x >= m.x，但以防逻辑变动)
+    let local_x = std::cmp::max(0, local_x_i32) as u32;
+    let local_y = std::cmp::max(0, local_y_i32) as u32;
+
+    let image = target_monitor.capture_image().map_err(|e| e.to_string())?;
     let img_w = image.width();
     let img_h = image.height();
     
-    // 确保起点在图像内
-    if start_x >= img_w || start_y >= img_h {
-        return Err("Crop region is outside monitor bounds".to_string());
+    // 如果起始点完全超出图片范围，直接返回错误或空图
+    if local_x >= img_w || local_y >= img_h {
+        return Err(format!("Crop start out of bounds: {},{} vs {}x{}", local_x, local_y, img_w, img_h));
     }
 
-    // 确保宽高不越界
-    let safe_w = w.min(img_w - start_x);
-    let safe_h = h.min(img_h - start_y);
+    // [修复] 增强边界检查，防止 crop_imm 恐慌 (Panic)
+    // 确保 local_x/y 不会越界
+    if local_x >= img_w || local_y >= img_h {
+        return Err(format!("Crop start out of bounds (Size: {}x{} vs Req: {},{})", img_w, img_h, local_x, local_y));
+    }
 
-    let sub_image = crop_imm(&image, start_x, start_y, safe_w, safe_h);
+    // 计算可用空间
+    let available_w = img_w - local_x;
+    let available_h = img_h - local_y;
+    
+    // 强制限制宽高，绝不超出图片边界
+    let safe_w = std::cmp::min(w, available_w);
+    let safe_h = std::cmp::min(h, available_h);
+    
+    if safe_w == 0 || safe_h == 0 {
+        return Err("Resulting crop size is 0".to_string());
+    }
 
-    // 5. 编码为 PNG 和 Base64
+    // 执行裁剪 (此时已安全)
+    let cropped = crop_imm(&image, local_x, local_y, safe_w, safe_h).to_image();
+    
     let mut buf = Vec::new();
     let mut cursor = Cursor::new(&mut buf);
-    sub_image.to_image().write_to(&mut cursor, ImageFormat::Png).map_err(|e| e.to_string())?;
+    cropped.write_to(&mut cursor, ImageFormat::Png).map_err(|e| e.to_string())?;
     
     let base64_str = general_purpose::STANDARD.encode(buf);
     Ok(format!("data:image/png;base64,{}", base64_str))
 }
 
+// 补全：按窗口名获取缩略图 (供前端 VideoPreview 组件调用)
 #[tauri::command]
 async fn capture_window_thumbnail(app_name: String) -> Result<String, String> {
+    // 1. 优先尝试使用 WGC 截图 (解决优动漫/CSP等硬件加速窗口无法被 xcap 捕获的问题)
+    if let Some(hwnd) = get_window_hwnd(app_name.clone()) {
+        // 调用 wgc 模块的新函数
+        if let Ok(b64) = wgc::capture_snapshot(hwnd) {
+            return Ok(b64);
+        }
+    }
+
+    // 2. 如果 WGC 失败，回退到 xcap 逻辑
     let windows = Window::all().map_err(|e| e.to_string())?;
-    
-    // 修复: 预处理搜索词，转小写并去除 .exe 后缀
     let needle = app_name.to_lowercase().replace(".exe", "");
     
-    // 模糊匹配：同时检查 app_name 和 title，忽略大小写
-    let target = windows.into_iter().find(|w| {
+    let mut matches: Vec<Window> = windows.into_iter().filter(|w| {
         let w_app = w.app_name().to_lowercase();
         let w_title = w.title().to_lowercase();
-        w_app.contains(&needle) || w_title.contains(&needle)
-    }).ok_or_else(|| format!("Window not found: {}", needle))?;
+        (w_app.contains(&needle) || w_title.contains(&needle)) && 
+        w.width() > 10 && w.height() > 10 && 
+        !w.is_minimized() 
+    }).collect();
 
-    // 截图 (Window 模式通常不受遮挡影响)
+    // 取面积最大的那个窗口
+    matches.sort_by(|a, b| (b.width() * b.height()).cmp(&(a.width() * a.height())));
+
+    let target = matches.first().ok_or_else(|| format!("Window not found: {}", needle))?;
+
     let image = target.capture_image().map_err(|e| e.to_string())?;
     
-    // 转换为 Base64
     let mut buf = Vec::new();
     let mut cursor = Cursor::new(&mut buf);
+    // 使用 PNG 以支持透明度（如果有）
     image.write_to(&mut cursor, ImageFormat::Png).map_err(|e| e.to_string())?;
     
     let base64_str = general_purpose::STANDARD.encode(buf);
@@ -997,14 +1144,16 @@ fn parse_hotkey(combo: &str) -> (i32, i32) {
 }
 
 #[tauri::command]
-fn update_extra_hotkeys(gray: String, pick: String, moni: String, flags: i32) {
+fn update_extra_hotkeys(gray: String, pick: String, moni: String, region: String, ref_key: String, flags: i32) {
     let (gc, gm) = parse_hotkey(&gray);
     let (pc, pm) = parse_hotkey(&pick);
     let (mc, mm) = parse_hotkey(&moni);
+    let (reg_c, reg_m) = parse_hotkey(&region);
+    let (ref_c, ref_m) = parse_hotkey(&ref_key);
     
-    // 添加日志，确认前端传过来的值解析成了什么
-    log_to_file(format!("Global Hotkeys Updated: Gray={:?}({}), Pick={:?}({}), Moni={:?}({}), Flags={}", 
-        &gray, gc, &pick, pc, &moni, mc, flags));
+    // 添加日志
+    log_to_file(format!("Global Hotkeys: Gray={:?}, Pick={:?}, Moni={:?}, Region={:?}, Ref={:?}, Flags={}", 
+        &gray, &pick, &moni, &region, &ref_key, flags));
 
     HK_GRAY_CODE.store(gc, Ordering::Relaxed);
     HK_GRAY_MODS.store(gm, Ordering::Relaxed);
@@ -1012,6 +1161,10 @@ fn update_extra_hotkeys(gray: String, pick: String, moni: String, flags: i32) {
     HK_PICK_MODS.store(pm, Ordering::Relaxed);
     HK_MONI_CODE.store(mc, Ordering::Relaxed);
     HK_MONI_MODS.store(mm, Ordering::Relaxed);
+    HK_REGION_CODE.store(reg_c, Ordering::Relaxed);
+    HK_REGION_MODS.store(reg_m, Ordering::Relaxed);
+    HK_REF_CODE.store(ref_c, Ordering::Relaxed);
+    HK_REF_MODS.store(ref_m, Ordering::Relaxed);
     
     HK_GLOBAL_FLAGS.store(flags, Ordering::Relaxed);
 }
@@ -1100,6 +1253,45 @@ struct AppGroup {
     windows: Vec<WindowInfo>,
 }
 
+// [新增] 获取所有显示器的组合边界 (用于跨屏窗口)
+#[derive(serde::Serialize)]
+struct VirtualRect {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+#[tauri::command]
+fn get_total_monitor_bounds() -> Result<VirtualRect, String> {
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    
+    if monitors.is_empty() {
+        return Err("No monitors found".to_string());
+    }
+
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_right = i32::MIN;
+    let mut max_bottom = i32::MIN;
+
+    for m in monitors {
+        if m.x() < min_x { min_x = m.x(); }
+        if m.y() < min_y { min_y = m.y(); }
+        let right = m.x() + m.width() as i32;
+        let bottom = m.y() + m.height() as i32;
+        if right > max_right { max_right = right; }
+        if bottom > max_bottom { max_bottom = bottom; }
+    }
+
+    Ok(VirtualRect {
+        x: min_x,
+        y: min_y,
+        w: (max_right - min_x) as u32,
+        h: (max_bottom - min_y) as u32,
+    })
+}
+
 #[tauri::command]
 fn get_app_windows_tree() -> Vec<AppGroup> {
     use std::collections::HashMap;
@@ -1186,6 +1378,8 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
         let mut last_gray = false;
         let mut last_pick = false;
         let mut last_moni = false;
+        let mut last_region = false;
+        let mut last_ref = false;
 
         loop {
             thread::sleep(Duration::from_millis(10));
@@ -1291,6 +1485,30 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
                             let _ = app_handle.emit("global-hotkey", "monitor");
                         }
                         last_moni = pressed;
+                    }
+                }
+
+                // Region Monitor (Flag 8)
+                if (flags & 8) != 0 {
+                    let code = HK_REGION_CODE.load(Ordering::Relaxed);
+                    if code != 0 {
+                        let pressed = (GetAsyncKeyState(code) as u16 & 0x8000) != 0;
+                        if pressed && !last_region && mods == HK_REGION_MODS.load(Ordering::Relaxed) {
+                            let _ = app_handle.emit("global-hotkey", "region");
+                        }
+                        last_region = pressed;
+                    }
+                }
+
+                // Reference Capture (Flag 16)
+                if (flags & 16) != 0 {
+                    let code = HK_REF_CODE.load(Ordering::Relaxed);
+                    if code != 0 {
+                        let pressed = (GetAsyncKeyState(code) as u16 & 0x8000) != 0;
+                        if pressed && !last_ref && mods == HK_REF_MODS.load(Ordering::Relaxed) {
+                            let _ = app_handle.emit("global-hotkey", "ref");
+                        }
+                        last_ref = pressed;
                     }
                 }
             }
@@ -1452,24 +1670,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
                 send_key(0x5B, true); mods_to_restore.push(0x5B); 
             }
             
-            // --- 步骤 1: 显示色块 (立即执行) ---
-            // 放大尺寸到 20x20，并居中于鼠标
-            let current_style = GetWindowLongW(spot_hwnd, GWL_EXSTYLE);
-            let target_style = current_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32 | WS_EX_LAYERED.0 as i32 | WS_EX_TRANSPARENT.0 as i32;
-            SetWindowLongW(spot_hwnd, GWL_EXSTYLE, target_style);
-
-            let _ = SetWindowPos(
-                spot_hwnd, HWND_TOPMOST, 
-                original_pos.x - 10, original_pos.y - 10, 20, 20, 
-                SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW
-            );
-            let _ = ShowWindow(spot_hwnd, SW_SHOWNOACTIVATE);
-            
-            // [优化] 等待渲染：增加到 50ms，适应低刷新率屏幕或高负载 CPU
-            thread::sleep(Duration::from_millis(50));
-
-            // --- 步骤 2: 触发取色 (按键) ---
-            // [修复] 预处理 NUM+，防止被 split('+') 错误分割成 ["NUM", ""]
+            // --- 步骤 1: 触发取色 (按键先行) ---
+            // 调整顺序：先切换工具，给软件反应时间，再显示色块，避免窗口焦点抢占问题
             let pick_key_fixed = pick_key_str.replace("NUM+", "NUMADD"); 
             let parts: Vec<&str> = pick_key_fixed.split('+').collect();
             let mut keys_to_release = Vec::new();
@@ -1481,8 +1683,30 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
                 }
             }
             
-            // [优化] 等待软件响应：增加到 60ms，某些重型软件(如PS)切换工具较慢
+            // [修复] 等待软件切换工具：60ms
+            // 优动漫/PS 等软件切换工具需要时间，太快会导致点击时工具还没切换过来
             thread::sleep(Duration::from_millis(60));
+
+            // --- 步骤 2: 显示色块 ---
+            // 强制重置样式，防止多次调用导致样式位掩码混乱
+            // 关键：保留 WS_EX_TRANSPARENT 确保点击能穿透给目标软件，但依靠视觉覆盖让软件吸取到色块颜色
+            let base_style = GetWindowLongW(spot_hwnd, GWL_EXSTYLE);
+            let target_style = base_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32 | WS_EX_LAYERED.0 as i32 | WS_EX_TRANSPARENT.0 as i32;
+            SetWindowLongW(spot_hwnd, GWL_EXSTYLE, target_style);
+
+            // [Fix] 增大色块尺寸至 100x100，以覆盖多屏 DPI 缩放导致的坐标偏移误差
+            let size = 100;
+            let offset = size / 2;
+            let _ = SetWindowPos(
+                spot_hwnd, HWND_TOPMOST, 
+                original_pos.x - offset, original_pos.y - offset, size, size, 
+                SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW
+            );
+            let _ = ShowWindow(spot_hwnd, SW_SHOWNOACTIVATE);
+            
+            // [修复] 等待 DWM 渲染：针对双屏/高负载环境，增加到 100ms
+            // 确保窗口在副屏完全渲染可见，防止吸取穿透
+            thread::sleep(Duration::from_millis(100));
 
             // --- 步骤 3: 模拟点击 ---
             // 再次校准鼠标位置
@@ -1496,8 +1720,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             };
             SendInput(&[input_down], std::mem::size_of::<INPUT>() as i32);
             
-            // [调整] 点击保持时间 (增加到 30ms，防止过快被忽略)
-            thread::sleep(Duration::from_millis(30));
+            // [调整] 点击保持时间 (增加到 40ms，确保重型软件能识别点击)
+            thread::sleep(Duration::from_millis(40));
             
             let input_up = INPUT {
                 r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_MOUSE,
@@ -1514,8 +1738,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             }
 
             // [关键修复] 延长色块存活时间
-            // 在点击和释放按键全部完成后，再额外多留 150ms，确保软件完成取色采样
-            thread::sleep(Duration::from_millis(150));
+            // 在点击和释放按键全部完成后，再额外多留 40ms，确保软件完成取色采样
+            thread::sleep(Duration::from_millis(40));
 
             // --- 步骤 5: 隐藏色块 ---
             let _ = ShowWindow(spot_hwnd, SW_HIDE);
@@ -1671,7 +1895,10 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
         save_clipboard_to_temp,
         set_hotkey_recording_status,
         save_config_file, // 本地保存
-        load_config_file  // 本地读取
+        load_config_file,  // 本地读取
+        capture_current_monitor_snapshot, // [修改]
+        fetch_pending_snapshot, // [新增]
+        move_window_to_cursor_monitor // [新增] 自动定位
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

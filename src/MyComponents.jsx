@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen, emit } from '@tauri-apps/api/event';
-import { Triangle, Grid, Copy, Eye, Pipette, Image as ImageIcon, Maximize2, Minimize2, Layers, Monitor, Crop, X, RefreshCw, AlertCircle } from 'lucide-react';
+import { Triangle, Grid, Copy, Eye, Pipette, Image as ImageIcon, Maximize2, Minimize2, Layers, Monitor, Crop, X, RefreshCw, AlertCircle, Link, Check, ChevronDown } from 'lucide-react';
 import { 
     LUMA_ALGORITHMS, getLuminance, hsvToRgb, rgbToHex, hexToRgb, rgbToHsv, 
     toGamma, rgbToCmyk, cmykToRgb, rgbToLab, culoriRgb, culoriCmyk 
@@ -149,10 +149,12 @@ export const GlobalSvgFilters = ({ icc = 'rec601' }) => {
 };
 
 // --- 色轮组件 ---
-export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurrent, onCommit, pickerMode, onToggleMode, colorSlots, activeSlot, onSlotClick, lang, isDark, monitorPos, setMonitorPos, monitorRgb, isPickingPixel, setIsPickingPixel }) => {
+export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurrent, onCommit, pickerMode, onToggleMode, colorSlots, activeSlot, onSlotClick, lang, isDark, monitorPos, setMonitorPos, monitorRgb, monitorSync, setMonitorSync, isPickingPixel, setIsPickingPixel }) => {
   const canvasRef = useRef(null);
   const [isDraggingRing, setIsDraggingRing] = useState(false);
   const [isDraggingShape, setIsDraggingShape] = useState(false);
+  // [修复] 添加 rAF 引用，用于数位板高频事件节流
+  const rAfRef = useRef(null); 
   const t = (zh, en) => lang === 'zh' ? zh : en;
 
   const size = 170; 
@@ -226,38 +228,56 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
   }, [hue, saturation, value, pickerMode]);
 
   const handleInteraction = (e) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX; const y = (e.clientY - rect.top) * scaleY;
-    const dist = Math.sqrt((x - center)**2 + (y - center)**2);
-    if (!isDraggingRing && !isDraggingShape && dist > size/2) return;
+    // [性能优化] 极速节流：如果已有挂起的帧，直接返回，不读取任何事件属性
+    // 这对数位板（高回报率设备）至关重要，防止主线程被事件洪水淹没
+    if (rAfRef.current) return;
 
-    if (!isDraggingShape && (isDraggingRing || (dist > innerRadius && dist < outerRadius + 5))) {
-      setIsDraggingRing(true);
-      let angle = Math.atan2(y - center, x - center) - rotationOffset;
-      let newHue = (angle * 180 / Math.PI + 360) % 360;
-      onChange({ h: newHue });
-    } else if (!isDraggingRing) {
-      setIsDraggingShape(true);
-      let newS, newV;
-      if (pickerMode === 'triangle') {
-          const tipX = center + shapeRadius; const backX = center - shapeRadius * 0.5;
-          const topY = center - shapeRadius * 0.866; const botY = center + shapeRadius * 0.866;
-          const vHue = {x:tipX, y:center}, vWhite={x:backX, y:topY}, vBlack={x:backX, y:botY};
-          const denom = (vWhite.y - vBlack.y) * (vHue.x - vBlack.x) + (vBlack.x - vWhite.x) * (vHue.y - vBlack.y);
-          const wHue = ((vWhite.y - vBlack.y) * (x - vBlack.x) + (vBlack.x - vWhite.x) * (y - vBlack.y)) / denom;
-          const wBlack = 1 - wHue - ((vBlack.y - vHue.y) * (x - vBlack.x) + (vHue.x - vBlack.x) * (y - vBlack.y)) / denom;
-          newV = 1 - wBlack; newS = newV > 0.001 ? wHue / newV : 0;
-      } else {
-          const boxSize = shapeRadius * 1.4; const startX = center - boxSize/2; const startY = center - boxSize/2;
-          newS = (x - startX) / boxSize; newV = 1 - ((y - startY) / boxSize);
-      }
-      onChange({ s: Math.max(0, Math.min(100, newS * 100)), v: Math.max(0, Math.min(100, newV * 100)) });
-    }
+    // 仅在未节流时读取坐标
+    const clientX = e.clientX;
+    const clientY = e.clientY;
+
+    rAfRef.current = requestAnimationFrame(() => {
+        rAfRef.current = null; // 重置锁
+
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
+        const x = (clientX - rect.left) * scaleX; const y = (clientY - rect.top) * scaleY;
+        const dist = Math.sqrt((x - center)**2 + (y - center)**2);
+        
+        // 注意：这里移除了对 e.buttons 的判断，因为在 rAF 中访问不到，且外层 pointermove 已隐含
+        if (!isDraggingRing && !isDraggingShape && dist > size/2) return;
+
+        if (!isDraggingShape && (isDraggingRing || (dist > innerRadius && dist < outerRadius + 5))) {
+          setIsDraggingRing(true);
+          let angle = Math.atan2(y - center, x - center) - rotationOffset;
+          let newHue = (angle * 180 / Math.PI + 360) % 360;
+          onChange({ h: newHue });
+        } else if (!isDraggingRing) {
+          setIsDraggingShape(true);
+          let newS, newV;
+          if (pickerMode === 'triangle') {
+              const tipX = center + shapeRadius; const backX = center - shapeRadius * 0.5;
+              const topY = center - shapeRadius * 0.866; const botY = center + shapeRadius * 0.866;
+              const vHue = {x:tipX, y:center}, vWhite={x:backX, y:topY}, vBlack={x:backX, y:botY};
+              const denom = (vWhite.y - vBlack.y) * (vHue.x - vBlack.x) + (vBlack.x - vWhite.x) * (vHue.y - vBlack.y);
+              const wHue = ((vWhite.y - vBlack.y) * (x - vBlack.x) + (vBlack.x - vWhite.x) * (y - vBlack.y)) / denom;
+              const wBlack = 1 - wHue - ((vBlack.y - vHue.y) * (x - vBlack.x) + (vHue.x - vBlack.x) * (y - vBlack.y)) / denom;
+              newV = 1 - wBlack; newS = newV > 0.001 ? wHue / newV : 0;
+          } else {
+              const boxSize = shapeRadius * 1.4; const startX = center - boxSize/2; const startY = center - boxSize/2;
+              newS = (x - startX) / boxSize; newV = 1 - ((y - startY) / boxSize);
+          }
+          onChange({ s: Math.max(0, Math.min(100, newS * 100)), v: Math.max(0, Math.min(100, newV * 100)) });
+        }
+    });
   };
-  const stopDrag = () => { setIsDraggingRing(false); setIsDraggingShape(false); };
+  const stopDrag = () => { 
+      // [修复] 停止时取消挂起的动画帧，防止松手后的滞后帧重新激活拖拽状态
+      if (rAfRef.current) { cancelAnimationFrame(rAfRef.current); rAfRef.current = null; }
+      setIsDraggingRing(false); setIsDraggingShape(false); 
+  };
 
   return (
     <div className="flex flex-col w-full select-none h-[210px] relative pt-1">
@@ -280,6 +300,8 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                 onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); handleInteraction(e); }}
                 onPointerMove={(e) => (isDraggingRing || isDraggingShape) && handleInteraction(e)}
                 onPointerUp={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); stopDrag(); if(onCommit) onCommit(); }}
+                // [修复] 监听指针捕获丢失事件(如拖出窗口松开)，作为 pointerUp 的兜底，防止拖拽状态卡死
+                onLostPointerCapture={(e) => { stopDrag(); if(onCommit) onCommit(); }}
             />
         </div>
         
@@ -340,9 +362,40 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                      <button 
                         className={`w-6 h-6 rounded border flex items-center justify-center shadow-sm transition-all
                         ${isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'}`}
-                        onClick={(e) => {
+                        onClick={async (e) => {
                             e.stopPropagation();
-                            if (window.EyeDropper) new window.EyeDropper().open().then(res => { const c = hexToRgb(res.sRGBHex); if(c) onChange(rgbToHsv(c.r, c.g, c.b)); }).catch(()=>{});
+                            e.currentTarget.blur();
+
+                            // [修复] 先尝试关闭旧窗口，并等待销毁完成，防止 Label 冲突
+                            try {
+                                const oldWin = await WebviewWindow.getByLabel('picker-overlay');
+                                if (oldWin) {
+                                    await oldWin.close();
+                                    // 关键修复：强制等待 200ms 让后台释放 Label，否则立即重建会失败
+                                    await new Promise(r => setTimeout(r, 200));
+                                }
+                            } catch (e) {}
+
+                            // [优化] 使用自定义高性能取色窗口，解决数位板卡顿问题
+                            // [修复] 移除死锁检查，允许强制重新触发防止卡死
+                            window._isPicking = true;
+                            
+                            // 先获取快照数据 (存入后端内存)
+                            try {
+                                await invoke('capture_current_monitor_snapshot');
+                                
+                                // 直接打开全屏窗口，位置和尺寸由窗口内部读取后端数据后决定
+                                new WebviewWindow('picker-overlay', {
+                                    url: 'index.html?mode=picker',
+                                    fullscreen: true, // 简单粗暴，直接全屏
+                                    transparent: true, decorations: false, alwaysOnTop: true, 
+                                    skipTaskbar: true, resizable: false, focus: true,
+                                    visible: false 
+                                });
+                            } catch (err) {
+                                console.error("Snapshot failed:", err);
+                                window._isPicking = false;
+                            }
                         }}
                         title={t("屏幕吸管", "EyeDropper")}
                      >
@@ -351,24 +404,12 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                  </div>
 
                  {/* [Issue 2] 重构：色槽重叠布局 (左上大 + 右下小) */}
-                 <div className="relative w-10 h-10 mb-0.5">
-                     
-                     {/* 1. 当前选色槽 (左上，略大) */}
+                     <div className="relative w-10 h-10 mb-0.5">
+                         
+                         {/* 1. 当前选色槽 (左上，略大) */}
                      <div 
-                        ref={(el) => {
-                            if (el && !window._syncInterval) { 
-                                window._syncInterval = setInterval(async () => {
-                                    try {
-                                        const rect = el.getBoundingClientRect();
-                                        const winPos = await appWindow.outerPosition();
-                                        invoke('update_sync_coords', { 
-                                            x: Math.round(winPos.x + rect.left + rect.width / 2), 
-                                            y: Math.round(winPos.y + rect.top + rect.height / 2) 
-                                        });
-                                    } catch(e) {}
-                                }, 1000);
-                            }
-                        }}
+                        // [Fix 3] 移除此处重复的定时器，减少 IPC 调用，缓解拖拽卡顿
+                        // 坐标同步已由 useTauriBackend 统一管理
                         onClick={() => onSlotClick(0)}
                         className={`absolute top-0 left-0 w-7 h-7 rounded-md shadow-md border transition-all cursor-pointer overflow-hidden group z-10
                         ${activeSlot === 0 ? 'border-white ring-1 ring-slate-400' : 'border-white/10 hover:scale-105'}`}
@@ -614,132 +655,271 @@ export const SliderItem = React.memo(({ label, val, min=0, max=100, type, channe
     </div>
 ));
 
-export const ColorSliders = ({ r, g, b, onChange, isDark, mode, setMode }) => {
-    // 移除内部 state，使用 props
-    // const [mode, setMode] = useState('RGB'); 
+export const ColorSliders = ({ r, g, b, onChange, isDark, mode, setMode, panelConfig, setPanelConfig }) => {
+    // [需求3] 状态管理：菜单显示状态
+    const [showMenu, setShowMenu] = useState(false);
+    const { sliderMultiMode, activeSliderModes } = panelConfig;
 
     const getGradient = useCallback((type, channel, currentVals) => {
+      try {
+        // 辅助：将归一化(0-1)的 culori 颜色对象转为 CSS 字符串
+        const toCss = (c) => {
+            if (!c) return 'transparent';
+            const r = Math.max(0, Math.min(255, Math.round(c.r * 255)));
+            const g = Math.max(0, Math.min(255, Math.round(c.g * 255)));
+            const b = Math.max(0, Math.min(255, Math.round(c.b * 255)));
+            return `rgb(${r},${g},${b})`;
+        };
+
         if (type === 'RGB') {
             const {r,g,b} = currentVals;
             if (channel === 'r') return `linear-gradient(to right, rgb(0,${g},${b}), rgb(255,${g},${b}))`;
             if (channel === 'g') return `linear-gradient(to right, rgb(${r},0,${b}), rgb(${r},255,${b}))`;
             if (channel === 'b') return `linear-gradient(to right, rgb(${r},${g},0), rgb(${r},${g},255))`;
         }
+        
         if (type === 'HSV') {
             const {h,s,v} = currentVals;
+            // H 色相条保持全光谱
             if (channel === 'h') return `linear-gradient(to right, #f00 0%, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00 100%)`;
-            if (channel === 's') return `linear-gradient(to right, hsl(${h},0%,${v}%), hsl(${h},100%,${v}%))`;
-            if (channel === 'v') return `linear-gradient(to right, black, hsl(${h},${s}%,100%))`;
+            
+            // 修复：S 和 V 使用 RGB 转换来计算两端颜色
+            if (channel === 's') {
+                const start = hsvToRgb(h, 0, v);
+                const end = hsvToRgb(h, 100, v);
+                return `linear-gradient(to right, ${rgbToHex(start.r,start.g,start.b)}, ${rgbToHex(end.r,end.g,end.b)})`;
+            }
+            if (channel === 'v') {
+                const end = hsvToRgb(h, s, 100);
+                return `linear-gradient(to right, black, ${rgbToHex(end.r,end.g,end.b)})`;
+            }
         }
+
+        // [修复] CMYK 动态渐变 (使用本地算法替代 culori，防止未注册导致无渐变)
         if (type === 'CMYK') {
-            if (channel === 'c') return 'linear-gradient(to right, white, cyan)';
-            if (channel === 'm') return 'linear-gradient(to right, white, magenta)';
-            if (channel === 'y') return 'linear-gradient(to right, white, yellow)';
-            if (channel === 'k') return 'linear-gradient(to right, white, black)';
-            return 'linear-gradient(to right, white, black)';
+            const { c, m, y, k } = currentVals || {c:0, m:0, y:0, k:0}; 
+            
+            // 计算起点(0%)和终点(100%)的 RGB 值
+            const s = cmykToRgb(
+                channel === 'c' ? 0 : c,
+                channel === 'm' ? 0 : m,
+                channel === 'y' ? 0 : y,
+                channel === 'k' ? 0 : k
+            );
+            const e = cmykToRgb(
+                channel === 'c' ? 100 : c,
+                channel === 'm' ? 100 : m,
+                channel === 'y' ? 100 : y,
+                channel === 'k' ? 100 : k
+            );
+
+            return `linear-gradient(to right, rgb(${s.r},${s.g},${s.b}), rgb(${e.r},${e.g},${e.b}))`;
         }
+
+        // [修复] LAB 动态渐变
         if (type === 'LAB') {
-             if (channel === 'l') return 'linear-gradient(to right, black, white)';
-             if (channel === 'a') return 'linear-gradient(to right, #00ff00, #ff00ff)';
-             if (channel === 'b') return 'linear-gradient(to right, #0000ff, #ffff00)';
+            const { l, a, b } = currentVals;
+            const base = { mode: 'lab', l, a, b };
+            let startCol, endCol;
+
+            if (channel === 'l') {
+                startCol = culoriRgb({ ...base, l: 0 });   // 黑
+                endCol = culoriRgb({ ...base, l: 100 }); // 白 (在当前色相下)
+            } else if (channel === 'a') {
+                startCol = culoriRgb({ ...base, a: -128 }); // 绿端
+                endCol = culoriRgb({ ...base, a: 127 });  // 红端
+            } else if (channel === 'b') {
+                startCol = culoriRgb({ ...base, b: -128 }); // 蓝端
+                endCol = culoriRgb({ ...base, b: 127 });  // 黄端
+            }
+            return `linear-gradient(to right, ${toCss(startCol)}, ${toCss(endCol)})`;
         }
         return 'none';
+      } catch (e) { 
+        // 发生错误时返回 none，防止白屏
+        return 'none'; 
+      }
     }, []);
 
     const updateRGB = (k, v) => onChange({ r: k==='r'?v:r, g: k==='g'?v:g, b: k==='b'?v:b });
 
-    return (
-        <div className={`p-4 rounded-xl border space-y-4 ${isDark ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'}`}>
-             <div className="flex gap-1 text-[10px] font-bold border-b border-gray-500/10 pb-2">
-                 {['RGB', 'HSV', 'CMYK', 'LAB'].map(m => (
-                     <button key={m} onClick={() => setMode(m)} className={`flex-1 py-1 rounded transition-colors ${mode===m ? 'bg-slate-500 text-white shadow' : 'opacity-40 hover:bg-black/5 hover:opacity-100'}`}>
-                         {m}
-                     </button>
-                 ))}
-             </div>
-             
-             {mode === 'RGB' && (
-                 <div>
+    const toggleMode = (m) => {
+        if (!sliderMultiMode) {
+            setMode(m);
+        } else {
+            // 多选逻辑
+            const newModes = activeSliderModes.includes(m) 
+                ? activeSliderModes.filter(x => x !== m) 
+                : [...activeSliderModes, m];
+            setPanelConfig(s => ({ ...s, activeSliderModes: newModes }));
+        }
+    };
+
+    // 渲染单个滑块组的逻辑封装
+    const renderSliderGroup = (type) => {
+        if (type === 'RGB') {
+            return (
+                 <div className="space-y-1 py-1">
                      <SliderItem label="R" val={r} max={255} type="RGB" channel="r" currentVals={{r,g,b}} setVal={v => updateRGB('r', v)} getGradient={getGradient} />
                      <SliderItem label="G" val={g} max={255} type="RGB" channel="g" currentVals={{r,g,b}} setVal={v => updateRGB('g', v)} getGradient={getGradient} />
                      <SliderItem label="B" val={b} max={255} type="RGB" channel="b" currentVals={{r,g,b}} setVal={v => updateRGB('b', v)} getGradient={getGradient} />
                  </div>
-             )}
+            );
+        }
+        if (type === 'HSV') {
+             const hsv = rgbToHsv(r,g,b);
+             const setHsv = (k, v) => {
+                 const newHsv = { ...hsv, [k]: v };
+                 onChange(hsvToRgb(newHsv.h, newHsv.s, newHsv.v));
+             };
+             return (
+                <div className="space-y-1 py-1">
+                    <SliderItem label="H" val={hsv.h} max={360} type="HSV" channel="h" currentVals={hsv} setVal={v => setHsv('h',v)} getGradient={getGradient} />
+                    <SliderItem label="S" val={hsv.s} max={100} type="HSV" channel="s" currentVals={hsv} setVal={v => setHsv('s',v)} getGradient={getGradient} />
+                    <SliderItem label="V" val={hsv.v} max={100} type="HSV" channel="v" currentVals={hsv} setVal={v => setHsv('v',v)} getGradient={getGradient} />
+                </div>
+             );
+        }
+        if (type === 'CMYK') {
+             let c=0, m=0, y=0, k=0;
+             try {
+                 if(culoriCmyk) {
+                    const cmykObj = culoriCmyk({ mode: 'rgb', r: r/255, g: g/255, b: b/255 });
+                    if(cmykObj) { c=cmykObj.c*100; m=cmykObj.m*100; y=cmykObj.y*100; k=cmykObj.k*100; }
+                 } else {
+                    const temp = rgbToCmyk(r,g,b);
+                    c=temp.c; m=temp.m; y=temp.y; k=temp.k;
+                 }
+             } catch(e) { const temp = rgbToCmyk(r,g,b); c=temp.c; m=temp.m; y=temp.y; k=temp.k; }
              
-             {mode === 'HSV' && (() => {
-                 const hsv = rgbToHsv(r,g,b);
-                 const setHsv = (k, v) => {
-                     const newHsv = { ...hsv, [k]: v };
-                     onChange(hsvToRgb(newHsv.h, newHsv.s, newHsv.v));
-                 };
-                 return (
-                    <div>
-                        <SliderItem label="H" val={hsv.h} max={360} type="HSV" channel="h" currentVals={hsv} setVal={v => setHsv('h',v)} getGradient={getGradient} />
-                        <SliderItem label="S" val={hsv.s} max={100} type="HSV" channel="s" currentVals={hsv} setVal={v => setHsv('s',v)} getGradient={getGradient} />
-                        <SliderItem label="V" val={hsv.v} max={100} type="HSV" channel="v" currentVals={hsv} setVal={v => setHsv('v',v)} getGradient={getGradient} />
-                    </div>
-                 );
-             })()}
-
-             {mode === 'CMYK' && (() => {
-                 let c=0, m=0, y=0, k=0;
-                 try {
-                     if(culoriCmyk) {
-                        const cmykObj = culoriCmyk({ mode: 'rgb', r: r/255, g: g/255, b: b/255 });
-                        if(cmykObj) { c=cmykObj.c*100; m=cmykObj.m*100; y=cmykObj.y*100; k=cmykObj.k*100; }
-                     } else {
-                        const temp = rgbToCmyk(r,g,b);
-                        c=temp.c; m=temp.m; y=temp.y; k=temp.k;
-                     }
-                 } catch(e) { const temp = rgbToCmyk(r,g,b); c=temp.c; m=temp.m; y=temp.y; k=temp.k; }
-                 
-                 const setCmyk = (key, val) => {
-                    try {
-                         if(culoriRgb) {
-                             const newCmyk = { mode: 'cmyk', c: c/100, m: m/100, y: y/100, k: k/100, [key]: val/100 };
-                             const newRgb = culoriRgb(newCmyk);
-                             if (newRgb) {
-                                onChange({ r: Math.round(newRgb.r*255), g: Math.round(newRgb.g*255), b: Math.round(newRgb.b*255) });
-                                return;
-                             }
+             const setCmyk = (key, val) => {
+                try {
+                     if(culoriRgb) {
+                         const newCmyk = { mode: 'cmyk', c: c/100, m: m/100, y: y/100, k: k/100, [key]: val/100 };
+                         const newRgb = culoriRgb(newCmyk);
+                         if (newRgb) {
+                            onChange({ r: Math.round(newRgb.r*255), g: Math.round(newRgb.g*255), b: Math.round(newRgb.b*255) });
+                            return;
                          }
-                         throw new Error("Culori failed");
-                    } catch(e) {
-                         const current = {c, m, y, k, [key]: val};
-                         onChange(cmykToRgb(current.c, current.m, current.y, current.k));
-                    }
-                 };
-                 return (
-                    <div>
-                        <SliderItem label="C" val={c} max={100} type="CMYK" channel="c" setVal={v=>setCmyk('c',v)} getGradient={getGradient} />
-                        <SliderItem label="M" val={m} max={100} type="CMYK" channel="m" setVal={v=>setCmyk('m',v)} getGradient={getGradient} />
-                        <SliderItem label="Y" val={y} max={100} type="CMYK" channel="y" setVal={v=>setCmyk('y',v)} getGradient={getGradient} />
-                        <SliderItem label="K" val={k} max={100} type="CMYK" channel="k" setVal={v=>setCmyk('k',v)} getGradient={getGradient} />
-                    </div>
-                 );
-             })()}
-
-             {mode === 'LAB' && (() => {
-                 const lab = rgbToLab(r, g, b);
-                 const setLab = (key, val) => {
-                     const newLab = { mode: 'lab', l: lab.l, a: lab.a, b: lab.b, [key]: val };
-                     const newRgb = culoriRgb(newLab);
-                     if (newRgb) {
-                        onChange({
-                            r: Math.max(0, Math.min(255, Math.round(newRgb.r * 255))),
-                            g: Math.max(0, Math.min(255, Math.round(newRgb.g * 255))),
-                            b: Math.max(0, Math.min(255, Math.round(newRgb.b * 255)))
-                        });
                      }
-                 };
-                 return (
-                     <div>
-                         <SliderItem label="L" val={lab.l} min={0} max={100} type="LAB" channel="l" currentVals={lab} setVal={v => setLab('l', v)} getGradient={getGradient} />
-                         <SliderItem label="A" val={lab.a} min={-128} max={128} type="LAB" channel="a" currentVals={lab} setVal={v => setLab('a', v)} getGradient={getGradient} />
-                         <SliderItem label="B" val={lab.b} min={-128} max={128} type="LAB" channel="b" currentVals={lab} setVal={v => setLab('b', v)} getGradient={getGradient} />
-                     </div>
-                 )
-             })()}
+                     throw new Error("Culori failed");
+                } catch(e) {
+                     const current = {c, m, y, k, [key]: val};
+                     onChange(cmykToRgb(current.c, current.m, current.y, current.k));
+                }
+             };
+             return (
+                <div className="space-y-1 py-1">
+                    <SliderItem label="C" val={c} max={100} type="CMYK" channel="c" currentVals={{c,m,y,k}} setVal={v=>setCmyk('c',v)} getGradient={getGradient} />
+                    <SliderItem label="M" val={m} max={100} type="CMYK" channel="m" currentVals={{c,m,y,k}} setVal={v=>setCmyk('m',v)} getGradient={getGradient} />
+                    <SliderItem label="Y" val={y} max={100} type="CMYK" channel="y" currentVals={{c,m,y,k}} setVal={v=>setCmyk('y',v)} getGradient={getGradient} />
+                    <SliderItem label="K" val={k} max={100} type="CMYK" channel="k" currentVals={{c,m,y,k}} setVal={v=>setCmyk('k',v)} getGradient={getGradient} />
+                </div>
+             );
+        }
+        if (type === 'LAB') {
+             const lab = rgbToLab(r, g, b);
+             const setLab = (key, val) => {
+                 const newLab = { mode: 'lab', l: lab.l, a: lab.a, b: lab.b, [key]: val };
+                 const newRgb = culoriRgb(newLab);
+                 if (newRgb) {
+                    onChange({
+                        r: Math.max(0, Math.min(255, Math.round(newRgb.r * 255))),
+                        g: Math.max(0, Math.min(255, Math.round(newRgb.g * 255))),
+                        b: Math.max(0, Math.min(255, Math.round(newRgb.b * 255)))
+                    });
+                 }
+             };
+             return (
+                 <div className="space-y-1 py-1">
+                     <SliderItem label="L" val={lab.l} min={0} max={100} type="LAB" channel="l" currentVals={lab} setVal={v => setLab('l', v)} getGradient={getGradient} />
+                     <SliderItem label="A" val={lab.a} min={-128} max={128} type="LAB" channel="a" currentVals={lab} setVal={v => setLab('a', v)} getGradient={getGradient} />
+                     <SliderItem label="B" val={lab.b} min={-128} max={128} type="LAB" channel="b" currentVals={lab} setVal={v => setLab('b', v)} getGradient={getGradient} />
+                 </div>
+             )
+        }
+        return null;
+    };
+
+    return (
+        // 去掉外层 p-4 和 border，因为 App.jsx 的容器已经有了
+        <div className="space-y-2">
+             {/* 顶部控制栏 */}
+             <div className="flex gap-1 text-[10px] font-bold border-b border-gray-500/10 pb-1 items-center relative">
+                 {/* 菜单触发器 */}
+                 <div className="relative">
+                     <button 
+                        onClick={() => setShowMenu(!showMenu)}
+                        className={`p-1 rounded hover:bg-black/10 transition-colors ${showMenu ? 'bg-black/10' : ''}`}
+                     >
+                         <ChevronDown size={10} />
+                     </button>
+                     
+                     {/* 下拉菜单 */}
+                     {showMenu && (
+                         <>
+                             <div className="fixed inset-0 z-[50]" onClick={() => setShowMenu(false)} />
+                             <div className={`absolute top-full left-0 mt-1 w-32 p-1 rounded-lg border shadow-xl z-[51] backdrop-blur-xl ${isDark ? 'bg-[#2a2a2a]/90 border-white/20' : 'bg-white/90 border-gray-200'}`}>
+                                 <div 
+                                    className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/10 mb-1 border-b border-white/5"
+                                    onClick={() => setPanelConfig(s => ({ ...s, sliderMultiMode: !sliderMultiMode }))}
+                                 >
+                                     <div className={`w-3 h-3 border rounded flex items-center justify-center ${sliderMultiMode ? 'bg-blue-500 border-blue-500' : 'border-gray-500'}`}>
+                                         {sliderMultiMode && <Check size={8} className="text-white" />}
+                                     </div>
+                                     <span className="font-normal opacity-80">多选模式 (Multi)</span>
+                                 </div>
+                                 
+                                 {/* 仅在多选模式下显示这些复选框 */}
+                                 {sliderMultiMode && ['RGB', 'HSV', 'CMYK', 'LAB'].map(m => (
+                                     <div 
+                                        key={m}
+                                        className="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer hover:bg-black/10"
+                                        onClick={() => toggleMode(m)}
+                                     >
+                                         <div className={`w-3 h-3 border rounded flex items-center justify-center ${activeSliderModes.includes(m) ? 'bg-slate-500 border-slate-500' : 'border-gray-500'}`}>
+                                             {activeSliderModes.includes(m) && <Check size={8} className="text-white" />}
+                                         </div>
+                                         <span className="opacity-70">{m}</span>
+                                     </div>
+                                 ))}
+                             </div>
+                         </>
+                     )}
+                 </div>
+
+                 {/* 标签栏：单选时显示所有Tab，多选时显示"Custom" */}
+                 {!sliderMultiMode ? (
+                     ['RGB', 'HSV', 'CMYK', 'LAB'].map(m => (
+                         <button key={m} onClick={() => setMode(m)} className={`flex-1 py-0.5 rounded transition-colors ${mode===m ? 'bg-slate-500 text-white shadow' : 'opacity-40 hover:bg-black/5 hover:opacity-100'}`}>
+                             {m}
+                         </button>
+                     ))
+                 ) : (
+                     <div className="flex-1 text-center py-0.5 opacity-50 italic">Multi-View</div>
+                 )}
+             </div>
+             
+             {/* 滑块内容渲染 */}
+             <div className="space-y-3">
+                 {sliderMultiMode ? (
+                     // 多选模式：遍历 activeSliderModes
+                     activeSliderModes.length > 0 ? (
+                         activeSliderModes.map(m => (
+                             <div key={m} className="animate-in fade-in slide-in-from-left-2">
+                                 {/* 只有在多选且多于1个时才显示小标题区分 */}
+                                 {activeSliderModes.length > 1 && <div className="text-[9px] font-bold opacity-30 px-1">{m}</div>}
+                                 {renderSliderGroup(m)}
+                             </div>
+                         ))
+                     ) : (
+                         <div className="text-center text-[9px] opacity-30 py-2">No active sliders</div>
+                     )
+                 ) : (
+                     // 单选模式
+                     renderSliderGroup(mode)
+                 )}
+             </div>
         </div>
     );
 };

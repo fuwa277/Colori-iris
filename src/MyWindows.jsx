@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { PhysicalSize } from '@tauri-apps/api/dpi';
@@ -10,7 +10,210 @@ import { RotateCcw } from 'lucide-react'; // 记得在顶部 import 列表添加
 
 const appWindow = getCurrentWindow();
 
-import { RegionSelector } from './MyComponents'; // 确保引入 RegionSelector
+import { RegionSelector } from './MyComponents'; 
+
+// --- 独立窗口：高性能屏幕取色器 (BMP优化 + 精准DPI处理) ---
+export const ScreenPickerWindow = () => {
+    const [snapshot, setSnapshot] = useState(null);
+    const [mousePos, setMousePos] = useState({ x: -1000, y: -1000 }); // 物理坐标 (用于取色)
+    const [uiPos, setUiPos] = useState({ x: -1000, y: -1000 });       // 逻辑坐标 (用于UI跟随)
+    const [pixelColor, setPixelColor] = useState('');
+    const canvasRef = useRef(null);
+    const magCanvasRef = useRef(null);
+
+    // 放大镜尺寸配置
+    const MAG_SIZE = 120;
+    const MAG_ZOOM = 4; // [修复] 倍率调小，视野更大 (原9)
+
+    useEffect(() => {
+        const init = async () => {
+            try {
+                // [性能优化] 直接从后端内存获取快照数据 (BMP Base64)
+                const snapshotData = await invoke('fetch_pending_snapshot');
+                
+                // 调整窗口位置以匹配截图区域 (多屏支持)
+                // 注意：snapshotData 中的 x,y 是物理坐标，需要转为逻辑坐标给 WebviewWindow
+                const scale = snapshotData.scale_factor || 1;
+                const logicalX = snapshotData.x / scale;
+                const logicalY = snapshotData.y / scale;
+                const logicalW = snapshotData.w / scale;
+                const logicalH = snapshotData.h / scale;
+
+                await appWindow.setPosition(new window.__TAURI__.dpi.LogicalPosition(logicalX, logicalY));
+                await appWindow.setSize(new window.__TAURI__.dpi.LogicalSize(logicalW, logicalH));
+
+                setSnapshot(snapshotData);
+                setTimeout(() => appWindow.show().then(() => appWindow.setFocus()), 50);
+            } catch (e) { 
+                console.error("Fetch snapshot failed:", e);
+                appWindow.close(); 
+            }
+        };
+        init();
+
+        const handleKey = (e) => { if (e.key === 'Escape') cancelPick(); };
+        window.addEventListener('keydown', handleKey);
+        return () => window.removeEventListener('keydown', handleKey);
+    }, []);
+
+    // 绘制背景图 (加载 Base64 BMP)
+    useEffect(() => {
+        if (!snapshot || !canvasRef.current) return;
+        const ctx = canvasRef.current.getContext('2d');
+        const img = new Image();
+        img.onload = () => {
+            ctx.clearRect(0, 0, snapshot.w, snapshot.h);
+            ctx.drawImage(img, 0, 0, snapshot.w, snapshot.h);
+        };
+        // [回退] 直接使用 Base64 Data URL (BMP格式)，避免文件权限问题导致黑屏
+        img.src = snapshot.data_url;
+    }, [snapshot]);
+
+    // 实时绘制放大镜
+    useEffect(() => {
+        if (!snapshot || !magCanvasRef.current || !canvasRef.current) return;
+        const ctx = magCanvasRef.current.getContext('2d');
+        const bgCtx = canvasRef.current.getContext('2d');
+        
+        const size = MAG_SIZE;
+        const halfSize = size / 2;
+        const sampleSize = Math.ceil(size / MAG_ZOOM); 
+        const halfSample = Math.floor(sampleSize / 2);
+
+        ctx.clearRect(0, 0, size, size);
+
+        // 1. 圆形遮罩
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(halfSize, halfSize, halfSize - 2, 0, Math.PI * 2);
+        ctx.clip();
+        
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, size, size);
+
+        ctx.imageSmoothingEnabled = false; 
+        
+        // [关键修复] 坐标对齐：确保鼠标点 (mousePos) 对应 sample 区域的正中心
+        const sx = Math.floor(mousePos.x) - halfSample;
+        const sy = Math.floor(mousePos.y) - halfSample;
+        
+        // [修复] 计算绘制偏移量，确保图像在圆圈内绝对居中
+        // 原逻辑直接画在 (0,0) 会导致因 zoom 无法整除 size 而产生的偏移
+        const drawSize = sampleSize * MAG_ZOOM;
+        const offsetX = (size - drawSize) / 2;
+        const offsetY = (size - drawSize) / 2;
+
+        ctx.drawImage(canvasRef.current, 
+            sx, sy, sampleSize, sampleSize, 
+            offsetX, offsetY, drawSize, drawSize
+        );
+
+        // 2. 网格线 (加上偏移量)
+        ctx.strokeStyle = 'rgba(128, 128, 128, 0.2)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for(let i=0; i<=sampleSize; i++) {
+            const pos = i * MAG_ZOOM;
+            // 线条也要加上 offset
+            ctx.moveTo(pos + offsetX, 0); ctx.lineTo(pos + offsetX, size);
+            ctx.moveTo(0, pos + offsetY); ctx.lineTo(size, pos + offsetY);
+        }
+        ctx.stroke();
+
+        // 3. 中心瞄准框 (加上偏移量)
+        const centerIdx = halfSample;
+        const cx = centerIdx * MAG_ZOOM + offsetX;
+        const cy = centerIdx * MAG_ZOOM + offsetY;
+        
+        ctx.strokeStyle = 'rgba(255, 255, 255, 1)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(cx, cy, MAG_ZOOM, MAG_ZOOM);
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx - 1, cy - 1, MAG_ZOOM + 2, MAG_ZOOM + 2);
+
+        // 4. 取色
+        const safeX = Math.max(0, Math.min(snapshot.w - 1, Math.floor(mousePos.x)));
+        const safeY = Math.max(0, Math.min(snapshot.h - 1, Math.floor(mousePos.y)));
+        const p = bgCtx.getImageData(safeX, safeY, 1, 1).data;
+        const hex = "#" + ((1 << 24) + (p[0] << 16) + (p[1] << 8) + p[2]).toString(16).slice(1).toUpperCase();
+        setPixelColor(hex);
+
+        // 5. 外边框
+        ctx.restore();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = hex; 
+        ctx.beginPath();
+        ctx.arc(halfSize, halfSize, halfSize - 2, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        ctx.lineWidth = 1; 
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+        ctx.stroke();
+
+    }, [mousePos, snapshot]);
+
+    const handleConfirm = async () => {
+        if (pixelColor) {
+            await emit('picker-color-selected', pixelColor);
+            cancelPick();
+        }
+    };
+
+    const cancelPick = async () => {
+        await appWindow.close();
+        await emit('picker-closed'); 
+    };
+
+    if (!snapshot) return null;
+
+    return (
+        <div 
+            className="w-screen h-screen overflow-hidden cursor-none bg-transparent"
+            onMouseMove={(e) => {
+                // 计算物理坐标用于取色
+                const scaleX = snapshot.w / window.innerWidth;
+                const scaleY = snapshot.h / window.innerHeight;
+                setMousePos({ 
+                    x: e.clientX * scaleX, 
+                    y: e.clientY * scaleY 
+                });
+                // 记录逻辑坐标用于 UI 跟随 (解决放大镜偏离问题)
+                setUiPos({ x: e.clientX, y: e.clientY });
+            }}
+            onMouseDown={(e) => {
+                if(e.button === 0) handleConfirm();
+                else if(e.button === 2) cancelPick();
+            }}
+            onContextMenu={(e) => { e.preventDefault(); }}
+        >
+            <canvas 
+                ref={canvasRef} 
+                width={snapshot.w} height={snapshot.h}
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none opacity-0" 
+            />
+            
+            <div 
+                className="fixed pointer-events-none z-50 flex flex-col items-center gap-2"
+                style={{ 
+                    // 直接使用逻辑坐标进行定位，确保绝对跟随鼠标
+                    left: uiPos.x - (MAG_SIZE / 2), 
+                    top: uiPos.y - (MAG_SIZE / 2) 
+                }}
+            >
+                <canvas 
+                    ref={magCanvasRef} 
+                    width={MAG_SIZE} height={MAG_SIZE} 
+                    className="drop-shadow-[0_10px_20px_rgba(0,0,0,0.5)]"
+                    style={{ width: MAG_SIZE, height: MAG_SIZE }}
+                />
+                <div className="bg-black/80 text-white text-[10px] font-bold font-mono px-2 py-1 rounded-full backdrop-blur-md border border-white/20 shadow-lg">
+                    {pixelColor}
+                </div>
+            </div>
+        </div>
+    );
+};
 
 // --- 独立窗口：监控器 (WGC Version / Enhanced) ---
 export const MonitorWindow = () => {
@@ -408,13 +611,33 @@ export const SelectorWindow = () => {
     const [endPos, setEndPos] = useState(null);     
     const [mode, setMode] = useState('idle'); 
     const [dragOffset, setDragOffset] = useState({x:0, y:0});
+    const [monitorScale, setMonitorScale] = useState(1); 
+    const [isReady, setIsReady] = useState(false); // [安全] 防止未定位完成时操作
 
     useEffect(() => {
-        invoke('set_window_topmost', { label: appWindow.label, topmost: true });
-        setTimeout(async () => {
-            await appWindow.show();
-            await appWindow.setFocus();
-        }, 100);
+        // [修复] 初始化时，强制将窗口移动到鼠标所在的显示器
+        const initWindow = async () => {
+            try {
+                // 1. 移动窗口并铺满该屏幕 (后端已同时设置了 Size，无需 setFullscreen)
+                // 这解决了 setFullscreen 在副屏可能导致的错位问题
+                const scale = await invoke('move_window_to_cursor_monitor', { label: appWindow.label });
+                setMonitorScale(scale);
+                
+                // 2. 置顶
+                await invoke('set_window_topmost', { label: appWindow.label, topmost: true });
+                
+                // 3. 直接显示 (延时极短以确保位置已更新)
+                setTimeout(async () => {
+                    await appWindow.show();
+                    await appWindow.setFocus();
+                    setIsReady(true); // [安全] 标记为就绪
+                }, 50); //稍微增加一点延时确保窗口移动完成
+            } catch (e) { 
+                console.error("Win Init Failed:", e); 
+                appWindow.close(); // 失败则关闭，防止残留不可见窗口
+            }
+        };
+        initWindow();
 
         const handleKey = (e) => { 
             if (e.key === 'Escape') cancelSelection();
@@ -422,7 +645,7 @@ export const SelectorWindow = () => {
         };
         window.addEventListener('keydown', handleKey);
         return () => window.removeEventListener('keydown', handleKey);
-    }, [startPos, endPos]);
+    }, [startPos, endPos]); // 注意：这里保留依赖是为了闭包，但 init 只执行一次(useEffect挂载)
 
     const getRect = () => {
         if (!startPos || !endPos) return null;
@@ -437,10 +660,37 @@ export const SelectorWindow = () => {
     const handleConfirm = async () => {
         const rect = getRect();
         if (!rect || rect.w < 5 || rect.h < 5) return;
+        
+        // [修复多屏坐标] 获取窗口的全局物理位置，加上鼠标相对位移
+        // [关键修复] 使用后端返回的 monitorScale 而不是前端的 dpr
+        const dpr = monitorScale; 
+        // [修复错位] 使用 innerPosition 确保获取的是网页内容区的绝对物理坐标，排除系统隐形边框干扰
+        const winPos = await appWindow.innerPosition(); 
+        
+        // [修复] 增加坐标安全取整，防止浮点数导致的 1px 缝隙
+        // 注意：目前后端机制限制，不支持跨屏截取。物理坐标是基于当前所在显示器的。
+        
+        // 1. 先计算相对于窗口的物理像素尺寸 (Logic -> Physical)
+        const physW = Math.floor(rect.w * dpr);
+        const physH = Math.floor(rect.h * dpr);
+        
+        // 2. 计算相对于窗口的物理偏移
+        const physOffsetX = Math.floor(rect.x * dpr);
+        const physOffsetY = Math.floor(rect.y * dpr);
+
+        const physicalRect = {
+            // 3. 加上窗口本身的物理基准坐标
+            // 使用 Math.max(0, ...) 是一种防御性编程，防止某些边缘情况出现负数导致后端判断屏幕错误
+            x: Math.round(winPos.x + physOffsetX), 
+            y: Math.round(winPos.y + physOffsetY),
+            w: physW,
+            h: physH
+        };
+
         await appWindow.hide();
         setTimeout(async () => {
             await emit('region-selected', { 
-                ...rect, 
+                ...physicalRect, 
                 purpose: window.location.search.includes('mode=monitor') ? 'monitor' : 'screenshot' 
             });
             appWindow.close();
@@ -453,6 +703,8 @@ export const SelectorWindow = () => {
     };
 
     const handleMouseDown = (e) => {
+        if (!isReady) return; // [安全] 未就绪不响应
+        
         // 关键：阻止默认行为，防止点击穿透到桌面
         e.preventDefault(); 
         e.stopPropagation();

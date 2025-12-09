@@ -94,11 +94,12 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse }) => {
                 </button>
 
                 <button onClick={() => {
-                        new WebviewWindow('selector-shot', {
+                        // [修复] 动态 Label
+                        new WebviewWindow(`selector-shot-${Date.now()}`, {
                             url: 'index.html?mode=screenshot',
                             transparent: true, fullscreen: true, alwaysOnTop: true, 
                             skipTaskbar: true, decorations: false, resizable: false,
-                            visible: false // 修复: 初始隐藏，防止白屏
+                            visible: false
                         });
                     }}
                     className={`h-24 flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed transition active:scale-95 ${isDark ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-black/5'}`}

@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom'; // 新增
 import { invoke } from '@tauri-apps/api/core';
 import { AlertCircle, X, ChevronDown, Palette } from 'lucide-react';
 import { HotkeyRecorder } from './MyComponents';
@@ -11,6 +12,25 @@ export const SettingsPanel = ({
     const [showAbout, setShowAbout] = useState(false);
     // [新增] 管理当前正在录制的组件ID，实现互斥
     const [activeRecorder, setActiveRecorder] = useState(null);
+    
+    // --- [新增] 多屏提示 Tooltip 逻辑 ---
+    const [showMultiTip, setShowMultiTip] = useState(false);
+    const [tipPos, setTipPos] = useState({ top: 0, left: 0 });
+    const tipBtnRef = useRef(null);
+
+    const handleTipEnter = () => {
+        if (tipBtnRef.current) {
+            const rect = tipBtnRef.current.getBoundingClientRect();
+            // 简单计算：居中显示在按钮下方，稍微靠左一点防止溢出
+            // 使用 fixed 定位，不受父容器滚动影响
+            setTipPos({ 
+                top: rect.bottom + 8, 
+                left: Math.min(window.innerWidth - 220, Math.max(10, rect.left - 100)) // 智能限制左右边界
+            });
+            setShowMultiTip(true);
+        }
+    };
+    // ----------------------------------
 
     // [新增] 智能更新热键，自动处理冲突
     const updateHotkey = (targetKey, newVal) => {
@@ -18,7 +38,7 @@ export const SettingsPanel = ({
             const next = { ...prev, [targetKey]: newVal };
             // 冲突检测：如果设置了新值（非清空），检查是否被其他键占用
             if (newVal) {
-                const keysToCheck = ['hotkeyGray', 'hotkeyPick', 'hotkeyMonitor', 'hotkeySyncKey', 'hotkeySyncPickKey'];
+                const keysToCheck = ['hotkeyGray', 'hotkeyPick', 'hotkeyMonitor', 'hotkeyRegion', 'hotkeyRef', 'hotkeySyncKey', 'hotkeySyncPickKey'];
                 keysToCheck.forEach(k => {
                     // 如果其他键的值等于当前设置的新值，则清空那个键（顶号逻辑）
                     if (k !== targetKey && next[k] === newVal) {
@@ -73,12 +93,43 @@ export const SettingsPanel = ({
             {/* 快捷键设置 */}
             <div className={`p-3 rounded-xl ${isDark?'bg-white/5':'bg-black/5'} space-y-2`}>
                 <div className="flex justify-between items-center mb-1 pb-1 border-b border-gray-500/10">
-                    <label className="text-xs opacity-70 font-bold">{t('快捷键', 'Hotkeys')}</label>
+                    <div className="flex items-center gap-2">
+                        <label className="text-xs opacity-70 font-bold">{t('快捷键', 'Hotkeys')}</label>
+                        {/* 帮助图标 */}
+                        <div 
+                            ref={tipBtnRef}
+                            onMouseEnter={handleTipEnter}
+                            onMouseLeave={() => setShowMultiTip(false)}
+                            className="opacity-40 hover:opacity-100 cursor-help transition-opacity"
+                        >
+                            <AlertCircle size={10} />
+                        </div>
+                    </div>
+                    
                     <div className="flex items-center gap-4">
                         <span className="text-[9px] opacity-40">{t('右键取消', 'R-Click Clear')}</span>
                         <span className="text-[9px] opacity-40 font-bold w-8 text-center">{t('全局', 'Global')}</span>
                     </div>
                 </div>
+
+                {/* Tooltip 渲染 (Portal 到 body，防止遮挡) */}
+                {showMultiTip && createPortal(
+                    <div 
+                        className="fixed z-[9999] w-52 p-3 bg-[#1a1a1a] text-gray-200 text-[10px] rounded-lg border border-white/10 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-100 pointer-events-none"
+                        style={{ top: tipPos.top, left: tipPos.left }}
+                    >
+                        <div className="font-bold text-teal-400 mb-1">{t('💡 多屏用户提示', '💡 Multi-Monitor Tip')}</div>
+                        <div className="leading-relaxed opacity-90">
+                            {t(
+                                '进行屏幕取色、区域监控或截图参考时，请先将鼠标移至目标屏幕，再按下快捷键，即可在该屏幕触发。', 
+                                'Hover mouse over the target screen BEFORE pressing hotkeys to capture content on that specific display.'
+                            )}
+                        </div>
+                        {/* 小箭头装饰 (可选) */}
+                        <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-[#1a1a1a] border-t border-l border-white/10 rotate-45"></div>
+                    </div>,
+                    document.body
+                )}
 
                 <div className="flex justify-between items-center text-xs h-7">
                     <span className="w-16 truncate">{t('黑白滤镜', 'Gray Filter')}</span>
@@ -118,6 +169,34 @@ export const SettingsPanel = ({
                         />
                         <div onClick={() => setSettings({...settings, globalMonitor: !settings.globalMonitor})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalMonitor ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
                             <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalMonitor ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex justify-between items-center text-xs h-7">
+                    <span className="w-16 truncate">{t('区域监控', 'Region Mon')}</span>
+                    <div className="flex-1 flex justify-end gap-3 items-center">
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyRegion" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyRegion} onChange={(val) => updateHotkey('hotkeyRegion', val)} 
+                            placeholder="None" isDark={isDark} 
+                        />
+                        <div onClick={() => setSettings({...settings, globalRegion: !settings.globalRegion})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalRegion ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
+                            <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalRegion ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex justify-between items-center text-xs h-7">
+                    <span className="w-16 truncate">{t('截图参考', 'Ref Capture')}</span>
+                    <div className="flex-1 flex justify-end gap-3 items-center">
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyRef" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyRef} onChange={(val) => updateHotkey('hotkeyRef', val)} 
+                            placeholder="None" isDark={isDark} 
+                        />
+                        <div onClick={() => setSettings({...settings, globalRef: !settings.globalRef})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalRef ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
+                            <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalRef ? 'translate-x-4' : 'translate-x-0'}`} />
                         </div>
                     </div>
                 </div>
@@ -243,7 +322,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.3 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.4 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

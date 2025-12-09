@@ -8,7 +8,7 @@ import { Palette, Sun, Moon, Minimize2, X, Pin, Eye, Layers, Pipette, Monitor, I
 
 import { LUMA_ALGORITHMS, getLuminance, toGamma, rgbToHsv, hsvToRgb, rgbToHex, hexToRgb } from './colorLogic';
 import { GlobalSvgFilters, ColorPickerArea, IsoLuminanceGraph, ColorSliders, RegionSelector, ScreenPanel } from './MyComponents';
-import { MonitorWindow, SelectorWindow, ReferenceWindow } from './MyWindows';
+import { MonitorWindow, SelectorWindow, ReferenceWindow, ScreenPickerWindow } from './MyWindows'; // [新增]
 import { SettingsPanel } from './SettingsPanel';
 import { RefPanel } from './RefPanel';
 
@@ -58,6 +58,32 @@ export default function App() {
           window.removeEventListener('drop', prevent);
       };
   }, []);
+
+// 辅助函数：打开覆盖全屏的选区窗口
+const openSelectorWindow = async (label, url) => {
+    try {
+        // 1. 获取虚拟桌面总边界
+        const bounds = await invoke('get_total_monitor_bounds');
+        
+        // 2. 创建窗口覆盖所有屏幕
+        new WebviewWindow(label, {
+            url: url,
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.w,
+            height: bounds.h,
+            transparent: true, 
+            decorations: false, 
+            alwaysOnTop: true, 
+            skipTaskbar: true, 
+            resizable: false,
+            visible: false, // 初始隐藏，防止闪烁
+            fullscreen: false // [关键] 必须关闭系统全屏，使用手动坐标
+        });
+    } catch (e) {
+        console.error("Failed to open selector:", e);
+    }
+};
 
   useEffect(() => {
       // --- [Probe Start] 拖拽调试探针 ---
@@ -118,6 +144,7 @@ export default function App() {
   if (appWindow.label.startsWith('monitor-')) return <MonitorWindow />;
   if (appWindow.label.startsWith('ref-')) return <ReferenceWindow />;
   if (appWindow.label.startsWith('selector')) return <SelectorWindow />;
+  if (appWindow.label === 'picker-overlay') return <ScreenPickerWindow />; // [新增]
   if (appWindow.label === 'sync_spot') {
       const slots = JSON.parse(localStorage.getItem('colori_slots') || '[]');
       const active = parseInt(localStorage.getItem('colori_active_slot') || '0');
@@ -165,6 +192,10 @@ export default function App() {
       hotkeyGray: 'Alt+G',      // 修改默认: 增加 Alt
       hotkeyPick: 'Alt+Space',  // 修改默认
       hotkeyMonitor: 'Alt+F2',  // 修改默认
+      hotkeyRegion: '',         // 新增
+      hotkeyRef: '',            // 新增
+      globalRegion: true,       // 默认开启全局
+      globalRef: true,          // 默认开启全局
       hotkeySyncEnabled: false, 
       hotkeySyncApp: '', 
       hotkeySyncKey: 'Shift+F12', // 默认触发键
@@ -176,8 +207,19 @@ export default function App() {
   const [monitorPos, setMonitorPos] = useState(null); 
   // [Issue 2] 独立的监控色状态，不干扰主色槽
   const [monitorRgb, setMonitorRgb] = useState({ r:0, g:0, b:0 });
+  // [需求1] 监控同步开关
+  const [monitorSync, setMonitorSync] = useState(false);
   const [isPickingPixel, setIsPickingPixel] = useState(false);
   const [macroStep, setMacroStep] = useState(null); // 新增：宏调试步骤状态
+  
+  // [需求2 & 3] 面板折叠与滑块配置
+  const [panelConfig, setPanelConfig] = useState(() => loadState('colori_panel_config', {
+      sliderCollapsed: false,
+      schemeCollapsed: false,
+      sliderMultiMode: false, // 是否开启多选模式
+      activeSliderModes: ['RGB'] // 多选模式下激活的滑块
+  }));
+
   // 1. 修改默认主题为 false (浅色), 保持 loadState 读取记忆
   const [isDark, setIsDark] = useState(() => loadState('colori_theme', false));
   const [lang, setLang] = useState(() => loadState('colori_lang', 'zh'));
@@ -260,9 +302,28 @@ export default function App() {
   // --- 副作用 (Effects) ---
   useEffect(() => localStorage.setItem('colori_history', JSON.stringify(paletteHistory)), [paletteHistory]);
   useEffect(() => localStorage.setItem('colori_saved', JSON.stringify(savedPalette)), [savedPalette]);
-  useEffect(() => localStorage.setItem('colori_slots', JSON.stringify(colorSlots)), [colorSlots]);
-  useEffect(() => localStorage.setItem('colori_active_slot', activeSlot), [activeSlot]);
+  
+  // [修复卡顿] 优化版防抖：使用 useRef 保持定时器，避免高频创建对象
+  const saveSlotsTimer = useRef(null);
+  useEffect(() => {
+      if (saveSlotsTimer.current) clearTimeout(saveSlotsTimer.current);
+      saveSlotsTimer.current = setTimeout(() => {
+          localStorage.setItem('colori_slots', JSON.stringify(colorSlots));
+      }, 500);
+      return () => { if(saveSlotsTimer.current) clearTimeout(saveSlotsTimer.current); };
+  }, [colorSlots]);
+
+  const saveActiveTimer = useRef(null);
+  useEffect(() => {
+      if (saveActiveTimer.current) clearTimeout(saveActiveTimer.current);
+      saveActiveTimer.current = setTimeout(() => {
+          localStorage.setItem('colori_active_slot', activeSlot);
+      }, 500);
+      return () => { if(saveActiveTimer.current) clearTimeout(saveActiveTimer.current); };
+  }, [activeSlot]);
+
   useEffect(() => localStorage.setItem('colori_theme', JSON.stringify(isDark)), [isDark]);
+  useEffect(() => localStorage.setItem('colori_panel_config', JSON.stringify(panelConfig)), [panelConfig]);
   useEffect(() => localStorage.setItem('colori_lang', JSON.stringify(lang)), [lang]);
   
   useEffect(() => {
@@ -282,16 +343,21 @@ export default function App() {
       if (settings.globalGray) flags |= 1;
       if (settings.globalPick) flags |= 2;
       if (settings.globalMonitor) flags |= 4;
+      if (settings.globalRegion ?? true) flags |= 8;
+      if (settings.globalRef ?? true) flags |= 16;
       
       console.log("[App] Updating Global Hotkeys:", {
           gray: settings.hotkeyGray, 
           pick: settings.hotkeyPick, 
           moni: settings.hotkeyMonitor, 
+          region: settings.hotkeyRegion,
+          ref: settings.hotkeyRef,
           flags
       });
 
       invoke('update_extra_hotkeys', { 
           gray: settings.hotkeyGray||"", pick: settings.hotkeyPick||"", moni: settings.hotkeyMonitor||"", 
+          region: settings.hotkeyRegion||"", refKey: settings.hotkeyRef||"",
           flags 
       }).catch(err => console.error("Failed to update hotkeys", err));
       
@@ -305,6 +371,21 @@ export default function App() {
           else setMacroStep(e.payload);
       });
 
+      // [新增] 监听自定义取色器的返回结果
+      const unlistenPicker = listen('picker-color-selected', (e) => {
+          const hex = e.payload;
+          const c = hexToRgb(hex);
+          if (c) {
+              // 模拟 EyeDropper 返回，更新颜色并释放锁
+              setColorSlots(prev => {
+                  const next = [...prev]; next[activeSlot] = c; if(activeSlot!==0) next[0]=c; return next;
+              });
+          }
+          window._isPicking = false;
+      });
+      // 监听取色器关闭事件 (释放锁)
+      const unlistenPickerClose = listen('picker-closed', () => { window._isPicking = false; });
+
       const unlisten = listen('global-hotkey', async (e) => {
           if (e.payload === 'gray') {
               // [修复] 更新时间锁，防止轮询器在系统响应前覆盖状态
@@ -316,32 +397,60 @@ export default function App() {
               } else setIsGrayscale(p => !p);
           }
           if (e.payload === 'pick') {
-              // 修复: 即使最小化也要先还原并置顶，否则 EyeDropper 会报错
+              // 修复: 即使最小化也要先还原并置顶
               if (await appWindow.isMinimized()) await appWindow.unminimize();
               await appWindow.show();
               await appWindow.setFocus();
               
-              if (window.EyeDropper && !window._isPicking) {
+              // [修改] 全局快捷键同样触发新的高性能取色器
+              if (!window._isPicking) {
                   window._isPicking = true;
-                  try { 
-                      const res = await new window.EyeDropper().open(); 
-                      const c = hexToRgb(res.sRGBHex); 
-                      if(c) {
-                          // 需要手动更新 state，因为这是异步事件
-                          setColorSlots(prev => {
-                              const next = [...prev]; next[activeSlot] = c; if(activeSlot!==0) next[0]=c; return next;
-                          });
-                      }
-                  } catch(err) {}
-                  window._isPicking = false;
+                  try {
+                      // 1. 后端截屏并存入内存 (极速)
+                      await invoke('capture_current_monitor_snapshot');
+                      
+                      // 2. 直接打开窗口，尺寸将在窗口内部自适应调整
+                      // 注意：这里初始宽高设为全屏或稍大即可，ScreenPickerWindow 会自适应
+                      new WebviewWindow('picker-overlay', {
+                          url: 'index.html?mode=picker',
+                          transparent: true, decorations: false, alwaysOnTop: true, 
+                          skipTaskbar: true, resizable: false, focus: true, visible: false,
+                          fullscreen: true // 强制全屏以覆盖
+                      });
+                  } catch(err) { 
+                      console.error(err);
+                      window._isPicking = false; 
+                  }
               }
           }
           if (e.payload === 'monitor') {
               await appWindow.setFocus();
               setIsPickingPixel(true);
           }
+          if (e.payload === 'region') {
+              // [修复] 使用动态 Label 防止冲突
+              new WebviewWindow(`selector-monitor-${Date.now()}`, {
+                  url: 'index.html?mode=monitor',
+                  transparent: true, fullscreen: true, alwaysOnTop: true, 
+                  skipTaskbar: true, decorations: false, resizable: false,
+                  visible: false
+              });
+          }
+          if (e.payload === 'ref') {
+              // [修复] 使用动态 Label 防止冲突
+              new WebviewWindow(`selector-shot-${Date.now()}`, {
+                  url: 'index.html?mode=screenshot',
+                  transparent: true, fullscreen: true, alwaysOnTop: true, 
+                  skipTaskbar: true, decorations: false, resizable: false,
+                  visible: false
+              });
+          }
       });
-      return () => { unlisten.then(f=>f()); };
+      return () => { 
+          unlisten.then(f=>f()); 
+          unlistenPicker.then(f=>f());
+          unlistenPickerClose.then(f=>f());
+      };
   }, [settings.grayMode, activeSlot]);
 
   useEffect(() => {
@@ -451,13 +560,17 @@ export default function App() {
           interval = setInterval(async () => {
               try {
                   const [r, g, b] = await invoke('get_pixel_color', { x: monitorPos.x, y: monitorPos.y });
-                  // [Issue 2] 仅更新监控色状态，不更新当前选色
+                  // [Issue 2] 仅更新监控色状态
                   setMonitorRgb({ r, g, b });
+                  // [需求1] 如果开启了同步，且颜色发生变化（简单判断），则同步到主色槽
+                  if (monitorSync) {
+                      handleRgbChange({ r, g, b }, true);
+                  }
               } catch (e) {}
           }, 100); // 优化: 降低轮询频率至 100ms (10FPS) 以节省 CPU
       }
       return () => clearInterval(interval);
-  }, [monitorPos]);
+  }, [monitorPos, monitorSync]); // 增加 monitorSync 依赖
 
   // 鼠标按下检测 (定点吸色)
   useEffect(() => {
@@ -619,6 +732,7 @@ export default function App() {
                             lang={lang} isDark={isDark}
                             monitorPos={monitorPos} setMonitorPos={setMonitorPos}
                             monitorRgb={monitorRgb} // 传入监控色
+                            monitorSync={monitorSync} setMonitorSync={setMonitorSync} // [需求1] 传入同步状态
                             isPickingPixel={isPickingPixel} setIsPickingPixel={setIsPickingPixel}
                         />
                     </div>
@@ -635,16 +749,17 @@ export default function App() {
                             </div>
                         </div>
 
-                        <div className="flex-1 overflow-y-auto custom-scrollbar relative pr-1">
-                            {subTab === 'sketch' && (
-                                /* 微调: -mt-[3px] 将素描图表向上移动约 3px */
+                        {/* [修复2] 将容器改为 flex-1 + overflow-hidden，利用子容器的 class 控制显示，实现滚动记忆 */}
+                        <div className="flex-1 overflow-hidden relative pr-1">
+                            
+                            {/* Sketch Tab */}
+                            <div className={`absolute inset-0 overflow-y-auto custom-scrollbar ${subTab === 'sketch' ? 'block' : 'hidden'}`}>
                                 <div className="animate-in fade-in space-y-1 pb-0 -mt-[3px]">
                                     <div className="rounded-lg border border-white/10 shadow-inner">
-                                        {/* [修复] 根据 settings.grayMode 动态选择算法: 系统模式维持 rec601，自定义模式跟随 active profile */}
                                         <IsoLuminanceGraph 
                                             targetLuminance={luma} 
                                             hue={hsv.h} saturation={hsv.s} 
-                                            value={hsv.v} // [新增] 传递 Value 以便组件内部重算 Gamma
+                                            value={hsv.v} 
                                             onPickColor={handleColorChange} 
                                             alg={settings.grayMode === 'system' ? 'rec601' : iccProfile}
                                             lang={lang}
@@ -655,7 +770,6 @@ export default function App() {
                                     <div className="flex justify-between items-center px-1">
                                         <span className="text-[9px] font-bold opacity-50 flex items-center gap-1 uppercase tracking-wider">
                                             <ImageIcon size={9} /> 
-                                            {/* 动态显示当前使用的算法名称 */}
                                             {settings.grayMode === 'system' ? 'Rec.601 (System)' : (LUMA_ALGORITHMS[iccProfile]?.name || 'Custom')}
                                         </span>
                                         <div className="flex gap-3 font-mono text-[10px]">
@@ -664,98 +778,120 @@ export default function App() {
                                         </div>
                                     </div>
                                 </div>
-                            )}
+                            </div>
 
-                            {subTab === 'scheme' && (
-                                <div className="animate-in fade-in space-y-2 pb-2 h-full flex flex-col">
-                                    <div className="shrink-0">
-                                        <ColorSliders 
-                                            r={rgb.r} g={rgb.g} b={rgb.b} 
-                                            onChange={handleRgbChange} 
-                                            isDark={isDark} 
-                                            mode={sliderMode} setMode={setSliderMode} // 传递 props
-                                        />
-                                    </div>
-                                    <div className="flex justify-end px-1">
-                                        <button 
-                                            onClick={() => setSchemeLockColor(schemeLockColor ? null : hsv)}
-                                            className={`
-                                                flex items-center gap-2 px-2 py-1 rounded-full text-[10px] transition-all border
-                                                ${schemeLockColor 
-                                                    ? 'bg-blue-500/10 text-blue-500 border-blue-500/30' 
-                                                    : 'bg-transparent text-slate-500 border-transparent hover:bg-slate-500/5'
-                                                }
-                                            `}
-                                        >
-                                            <span className="opacity-70">{t('锁定基准色', 'Lock Base')}</span>
-                                            <div className={`w-6 h-3 rounded-full relative transition-colors ${schemeLockColor ? 'bg-blue-500' : 'bg-slate-300'}`}>
-                                                <div className={`absolute top-0.5 w-2 h-2 bg-white rounded-full transition-transform shadow-sm ${schemeLockColor ? 'left-3.5' : 'left-0.5'}`} />
+                            {/* Scheme Tab - [修复2] 开启 overflow-y-auto 实现内部独立滚动 */}
+                            <div className={`absolute inset-0 overflow-y-auto custom-scrollbar p-1 ${subTab === 'scheme' ? 'block' : 'hidden'}`}>
+                                <div className="animate-in fade-in space-y-2 pb-2">
+                                    
+                                    {/* 色彩滑块区域 */}
+                                    <div className={`rounded-xl border transition-all ${isDark ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'}`}>
+                                        <div className="flex items-center justify-between p-2 cursor-pointer select-none" onClick={() => setPanelConfig(s => ({...s, sliderCollapsed: !s.sliderCollapsed}))}>
+                                            <span className="text-[10px] font-bold opacity-60 uppercase">{t('色彩滑块', 'Sliders')}</span>
+                                            <span className={`text-[9px] opacity-40 transform transition-transform ${panelConfig.sliderCollapsed ? '-rotate-90' : 'rotate-0'}`}>▼</span>
+                                        </div>
+                                        
+                                        {!panelConfig.sliderCollapsed && (
+                                            <div className="px-2 pb-2">
+                                                <ColorSliders 
+                                                    r={rgb.r} g={rgb.g} b={rgb.b} 
+                                                    onChange={handleRgbChange} 
+                                                    isDark={isDark} 
+                                                    mode={sliderMode} setMode={setSliderMode}
+                                                    panelConfig={panelConfig} setPanelConfig={setPanelConfig}
+                                                />
                                             </div>
-                                        </button>
+                                        )}
                                     </div>
-                                    <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
-                                        <div className="grid grid-cols-2 gap-2 mb-2">
-                                            {[
-                                                {id: 'complement', n: t('互补', 'Comp')},
-                                                {id: 'split', n: t('分离互补', 'Split')},
-                                                {id: 'triadic', n: t('三角', 'Tri')},
-                                                {id: 'tetradic', n: t('四角', 'Tetra')},
-                                                {id: 'analogous', n: t('近似', 'Ana')},
-                                            ].map(m => {
-                                                const harmonyColors = generateScheme(m.id);
-                                                const base = schemeLockColor || hsv;
-                                                const fullScheme = [base, ...harmonyColors];
-                                                return (
-                                                    <div key={m.id} className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
-                                                        <div className="text-[9px] opacity-50 mb-1">{m.n}</div>
+
+                                    {/* 配色方案区域 */}
+                                    <div className={`rounded-xl border transition-all ${isDark ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'}`}>
+                                        <div className="flex items-center justify-between p-2 cursor-pointer select-none" onClick={() => setPanelConfig(s => ({...s, schemeCollapsed: !s.schemeCollapsed}))}>
+                                            <span className="text-[10px] font-bold opacity-60 uppercase">{t('配色方案', 'Schemes')}</span>
+                                            {/* [修复3] 锁定按钮样式对齐与文字添加 */}
+                                            <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                                                <span className="text-[9px] opacity-50">{t('锁定基准色', 'Lock Base')}</span>
+                                                <button 
+                                                    onClick={() => setSchemeLockColor(schemeLockColor ? null : hsv)}
+                                                    className={`
+                                                        w-7 h-4 rounded-full relative transition-colors border border-transparent
+                                                        ${schemeLockColor ? 'bg-blue-500' : 'bg-slate-400/30 hover:bg-slate-400/50'}
+                                                    `}
+                                                    title={t('锁定基准色', 'Lock Base')}
+                                                >
+                                                    <div className={`absolute w-3 h-3 bg-white rounded-full transition-all shadow-sm ${schemeLockColor ? 'left-[13px] top-[1px]' : 'left-0.5 top-[1px]'}`} />
+                                                </button>
+                                                <span className={`text-[9px] opacity-40 transform transition-transform ml-1 cursor-pointer ${panelConfig.schemeCollapsed ? '-rotate-90' : 'rotate-0'}`} onClick={() => setPanelConfig(s => ({...s, schemeCollapsed: !s.schemeCollapsed}))}>▼</span>
+                                            </div>
+                                        </div>
+
+                                        {!panelConfig.schemeCollapsed && (
+                                            <div className="px-1 pb-1">
+                                                <div className="grid grid-cols-2 gap-2 mb-2">
+                                                    {[
+                                                        {id: 'complement', n: t('互补', 'Comp')},
+                                                        {id: 'split', n: t('分离互补', 'Split')},
+                                                        {id: 'triadic', n: t('三角', 'Tri')},
+                                                        {id: 'tetradic', n: t('四角', 'Tetra')},
+                                                        {id: 'analogous', n: t('近似', 'Ana')},
+                                                    ].map(m => {
+                                                        const harmonyColors = generateScheme(m.id);
+                                                        const base = schemeLockColor || hsv;
+                                                        const fullScheme = [base, ...harmonyColors];
+                                                        return (
+                                                            <div key={m.id} className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
+                                                                <div className="text-[9px] opacity-50 mb-1">{m.n}</div>
+                                                                <div className="flex h-4 rounded overflow-hidden">
+                                                                    {fullScheme.map((c, i) => (
+                                                                        <div key={i} className="flex-1 cursor-pointer hover:opacity-80 transition-opacity" 
+                                                                            style={{ backgroundColor: rgbToHex(hsvToRgb(c.h,c.s,c.v).r, hsvToRgb(c.h,c.s,c.v).g, hsvToRgb(c.h,c.s,c.v).b) }}
+                                                                            onClick={() => handleColorChange(c)}
+                                                                        />
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    
+                                                    <div className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
+                                                        <div className="flex justify-between items-center mb-1">
+                                                            <span className="text-[9px] opacity-50">{t('相似随机', 'Similar')}</span>
+                                                            <button onClick={() => setSimilarSeed(Math.random())} className="p-0.5 rounded hover:bg-white/10 text-slate-500"><RefreshCw size={10} /></button>
+                                                        </div>
                                                         <div className="flex h-4 rounded overflow-hidden">
-                                                            {fullScheme.map((c, i) => (
-                                                                <div key={i} className="flex-1 cursor-pointer" 
+                                                            {similarScheme.map((c, i) => (
+                                                                <div key={i} className="flex-1 cursor-pointer hover:opacity-80 transition-opacity" 
                                                                     style={{ backgroundColor: rgbToHex(hsvToRgb(c.h,c.s,c.v).r, hsvToRgb(c.h,c.s,c.v).g, hsvToRgb(c.h,c.s,c.v).b) }}
                                                                     onClick={() => handleColorChange(c)}
                                                                 />
                                                             ))}
                                                         </div>
                                                     </div>
-                                                );
-                                            })}
-                                            {/* 布局修改: 相似随机放在 近似(Ana) 的右边，即作为 grid 的最后一个元素 */}
-                                            <div className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
-                                                <div className="flex justify-between items-center mb-1">
-                                                    <span className="text-[9px] opacity-50">{t('相似随机', 'Similar')}</span>
-                                                    <button onClick={() => setSimilarSeed(Math.random())} className="p-0.5 rounded hover:bg-white/10 text-slate-500"><RefreshCw size={10} /></button>
                                                 </div>
-                                                <div className="flex h-4 rounded overflow-hidden">
-                                                    {similarScheme.map((c, i) => (
-                                                        <div key={i} className="flex-1 cursor-pointer" 
-                                                            style={{ backgroundColor: rgbToHex(hsvToRgb(c.h,c.s,c.v).r, hsvToRgb(c.h,c.s,c.v).g, hsvToRgb(c.h,c.s,c.v).b) }}
-                                                            onClick={() => handleColorChange(c)}
-                                                        />
-                                                    ))}
+                                                
+                                                <div className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
+                                                    <div className="flex justify-between items-center mb-1">
+                                                        <span className="text-[9px] opacity-50">{t('随机灵感', 'Random Idea')}</span>
+                                                        <button onClick={() => setRandomSeed(Math.random())} className="p-0.5 rounded hover:bg-white/10 text-slate-500"><RefreshCw size={10} /></button>
+                                                    </div>
+                                                    <div className="flex h-4 rounded overflow-hidden">
+                                                        {randomScheme.map((c, i) => (
+                                                            <div key={i} className="flex-1 cursor-pointer hover:opacity-80 transition-opacity" 
+                                                                style={{ backgroundColor: rgbToHex(hsvToRgb(c.h,c.s,c.v).r, hsvToRgb(c.h,c.s,c.v).g, hsvToRgb(c.h,c.s,c.v).b) }}
+                                                                onClick={() => handleColorChange(c)}
+                                                            />
+                                                        ))}
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                        {/* 完全随机 独占一行 */}
-                                        <div className={`p-2 rounded-lg border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
-                                            <div className="flex justify-between items-center mb-1">
-                                                <span className="text-[9px] opacity-50">{t('随机灵感', 'Random Idea')}</span>
-                                                <button onClick={() => setRandomSeed(Math.random())} className="p-0.5 rounded hover:bg-white/10 text-slate-500"><RefreshCw size={10} /></button>
-                                            </div>
-                                            <div className="flex h-4 rounded overflow-hidden">
-                                                {randomScheme.map((c, i) => (
-                                                    <div key={i} className="flex-1 cursor-pointer" 
-                                                        style={{ backgroundColor: rgbToHex(hsvToRgb(c.h,c.s,c.v).r, hsvToRgb(c.h,c.s,c.v).g, hsvToRgb(c.h,c.s,c.v).b) }}
-                                                        onClick={() => handleColorChange(c)}
-                                                    />
-                                                ))}
-                                            </div>
-                                        </div>
+                                        )}
                                     </div>
                                 </div>
-                            )}
+                            </div>
 
-                            {subTab === 'palette' && (
-                                <div className="animate-in fade-in space-y-4">
+                            {/* Palette Tab */}
+                            <div className={`absolute inset-0 overflow-y-auto custom-scrollbar ${subTab === 'palette' ? 'block' : 'hidden'}`}>
+                                <div className="animate-in fade-in space-y-4 pt-1">
                                     <div>
                                         <div className="flex justify-between items-center mb-2">
                                             <span className="text-[10px] font-bold opacity-50 uppercase">{t('收藏', 'Saved')}</span>
@@ -780,7 +916,7 @@ export default function App() {
                                         </div>
                                     </div>
                                 </div>
-                            )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -871,7 +1007,8 @@ export default function App() {
         </div>
 
         {/* --- 主要内容区域 --- */}
-        <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar relative [scrollbar-gutter:stable]">
+        {/* [修复2] 根据 Tab 类型决定滚动策略：Color/Screen 内部自理，其他(Settings/Ref)由父容器滚动 */}
+        <div className={`flex-1 min-h-0 relative ${['settings', 'push'].includes(activeTab) ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'}`}>
            {renderActiveTabContent()}
         </div>
 
@@ -890,11 +1027,7 @@ export default function App() {
             ))}
         </div>
         
-        {/* 底部调整高度手柄 */}
-        <div 
-            className="h-1.5 w-full cursor-ns-resize z-[200] hover:bg-slate-500/20 transition-colors absolute bottom-0 left-0"
-            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); appWindow.startResizeDragging(2); }}
-        />
+        {/* [修复] 已移除底部自定义调整手柄，解决阻挡原生把手的问题 */}
       </div>
       <style>{`
         .custom-scrollbar::-webkit-scrollbar { width: 3px; }
