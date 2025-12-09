@@ -1186,64 +1186,8 @@ export const ScreenPanel = ({ isDark, lang, sources, setSources }) => {
         });
     }, []);
 
-    useEffect(() => {
-        // 1. 区域选择监听
-        const unlistenRegion = listen('region-selected', async (event) => {
-            if (event.payload.purpose !== 'monitor') return;
-            const rect = event.payload;
-            const newSource = {
-                id: Date.now(),
-                type: 'region',
-                crop: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }, 
-                label: `Region ${Math.round(rect.w)}x${Math.round(rect.h)}`
-            };
-            setSources(prev => [...prev, newSource]);
-            openPip(newSource, false);
-        });
-
-        // 2. 状态变更监听
-        const unlistenState = listen('monitor-state-changed', (e) => {
-            setSources(prev => prev.map(s => {
-                if (`monitor-${s.id}` === e.payload.label) {
-                    return { ...s, isGray: e.payload.isGray };
-                }
-                return s;
-            }));
-        });
-
-        // 3. 可见性变更监听
-        const unlistenVis = listen('monitor-visibility-changed', (e) => {
-             setSources(prev => prev.map(s => {
-                if (`monitor-${s.id}` === e.payload.label) {
-                    return { ...s, active: e.payload.visible };
-                }
-                return s;
-            }));
-        });
-
-        // 4. 配置更新监听
-        const unlistenConfigUpdate = listen('update-source-config', (e) => {
-            const { id, newConfig } = e.payload;
-            setSources(prev => prev.map(s => {
-                if (String(s.id) === String(id)) {
-                    return { 
-                        ...s, 
-                        crop: { x: newConfig.x, y: newConfig.y, w: newConfig.w, h: newConfig.h },
-                        label: newConfig.label || s.label
-                    };
-                }
-                return s;
-            }));
-        });
-
-        // 统一清理
-        return () => {
-            unlistenRegion.then(f => f());
-            unlistenState.then(f => f());
-            unlistenVis.then(f => f());
-            unlistenConfigUpdate.then(f => f());
-        };
-    }, []);
+    // [MOVED] 事件监听逻辑已移至 App.jsx 以支持全局响应
+    // useEffect(() => { ... }, []);
 
     const handleRegionCapture = async () => {
         new WebviewWindow('selector-monitor', {

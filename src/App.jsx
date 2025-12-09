@@ -210,6 +210,53 @@ const openSelectorWindow = async (label, url) => {
   // [需求1] 监控同步开关
   const [monitorSync, setMonitorSync] = useState(false);
   const [isPickingPixel, setIsPickingPixel] = useState(false);
+
+  // [新增] WGC 支持检测 (用于 App 级调用)
+  const [wgcSupported, setWgcSupported] = useState(true);
+  useEffect(() => {
+        invoke('get_os_build_version').then(ver => {
+            if (ver < 18362) setWgcSupported(false);
+        });
+  }, []);
+
+  // [新增] 打开画中画窗口 (提升至 App 级以支持全局快捷键)
+  const openPip = async (src, startVisible = false) => {
+        if (!wgcSupported) return;
+        const label = `monitor-${src.id}`;
+        let params = `?mode=mag&id=${src.id}&type=${src.type}&label=${encodeURIComponent(src.label)}&tid=${src.targetId || 0}`;
+        if (src.crop) {
+            params += `&x=${src.crop.x}&y=${src.crop.y}&w=${src.crop.w}&h=${src.crop.h}`;
+        }
+        
+        try {
+            new WebviewWindow(label, {
+                url: `index.html${params}`,
+                skipTaskbar: !startVisible, 
+                title: src.label || 'Monitor',
+                width: src.crop ? src.crop.w : 400, 
+                height: src.crop ? src.crop.h : 300,
+                minWidth: 50, minHeight: 50,
+                transparent: true, 
+                backgroundColor: "#00000000",
+                alwaysOnTop: true,
+                decorations: false,
+                shadow: true,
+                visible: false 
+            });
+            
+            if (startVisible) {
+                setTimeout(async () => {
+                    const win = await WebviewWindow.getByLabel(label);
+                    if(win) {
+                        await win.setSkipTaskbar(false);
+                        await win.show();
+                        await win.setFocus();
+                    }
+                }, 300);
+            }
+        } catch(e) { console.error("OpenPip failed:", e); }
+  };
+
   const [macroStep, setMacroStep] = useState(null); // 新增：宏调试步骤状态
   
   // [需求2 & 3] 面板折叠与滑块配置
@@ -591,9 +638,25 @@ const openSelectorWindow = async (label, url) => {
       return () => { clearTimeout(startDelay); clearInterval(clickCheckTimer); };
   }, [isPickingPixel]);
 
+  // [修复] 全局监控源管理 (整合了截图参考与屏幕监控)
   useEffect(() => {
-      const unlisten = listen('region-selected', async (event) => {
+      // 1. 区域选择/截图监听
+      const unlistenRegion = listen('region-selected', async (event) => {
           const rect = event.payload;
+          
+          // Case A: 添加区域监控
+          if (rect.purpose === 'monitor') {
+              const newSource = {
+                  id: Date.now(),
+                  type: 'region',
+                  crop: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }, 
+                  label: `Region ${Math.round(rect.w)}x${Math.round(rect.h)}`
+              };
+              setMonitorSources(prev => [...prev, newSource]);
+              openPip(newSource, false); // 立即创建窗口
+          }
+          
+          // Case B: 截图参考
           if (rect.purpose === 'screenshot') {
              try {
                 await new Promise(r => setTimeout(r, 200)); 
@@ -613,8 +676,49 @@ const openSelectorWindow = async (label, url) => {
              } catch(e) { console.error(e); }
           }
       });
-      return () => { unlisten.then(f => f()); };
-  }, []);
+
+      // 2. 状态变更监听 (灰度等)
+      const unlistenState = listen('monitor-state-changed', (e) => {
+          setMonitorSources(prev => prev.map(s => {
+              if (`monitor-${s.id}` === e.payload.label) {
+                  return { ...s, isGray: e.payload.isGray };
+              }
+              return s;
+          }));
+      });
+
+      // 3. 可见性变更监听 (同步窗口显隐状态)
+      const unlistenVis = listen('monitor-visibility-changed', (e) => {
+           setMonitorSources(prev => prev.map(s => {
+              if (`monitor-${s.id}` === e.payload.label) {
+                  return { ...s, active: e.payload.visible };
+              }
+              return s;
+          }));
+      });
+
+      // 4. 配置更新监听 (二次裁剪)
+      const unlistenConfigUpdate = listen('update-source-config', (e) => {
+          const { id, newConfig } = e.payload;
+          setMonitorSources(prev => prev.map(s => {
+              if (String(s.id) === String(id)) {
+                  return { 
+                      ...s, 
+                      crop: { x: newConfig.x, y: newConfig.y, w: newConfig.w, h: newConfig.h },
+                      label: newConfig.label || s.label
+                  };
+              }
+              return s;
+          }));
+      });
+
+      return () => {
+          unlistenRegion.then(f => f());
+          unlistenState.then(f => f());
+          unlistenVis.then(f => f());
+          unlistenConfigUpdate.then(f => f());
+      };
+  }, [wgcSupported]); // 依赖 wgcSupported
 
   // --- 历史记录逻辑处理 ---
   // 1. 实时更新 (不写历史)
