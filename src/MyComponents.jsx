@@ -38,8 +38,14 @@ export const HotkeyRecorder = ({ value, onChange, placeholder, isDark, uniqueKey
     const handleKeyDown = (e) => {
         if (!recording) return;
         e.preventDefault(); e.stopPropagation();
+
+        // [新增] 安全拦截：禁止录入 Alt + F4，防止意外关闭窗口或保存危险热键
+        if (e.altKey && e.key === 'F4') {
+            return;
+        }
+
         const keys = [];
-        if (e.metaKey) keys.push('Win'); 
+        if (e.metaKey) keys.push('Win');
         if (e.ctrlKey) keys.push('Ctrl');
         if (e.shiftKey) keys.push('Shift');
         if (e.altKey) keys.push('Alt');

@@ -59,9 +59,9 @@ use base64::engine::{general_purpose, Engine};
 static PENDING_SNAPSHOT: Mutex<Option<MonitorSnapshot>> = Mutex::new(None);
 
 // 定义快照返回结构
-#[derive(serde::Serialize, Clone)] // 添加 Clone trait
+#[derive(serde::Serialize, Clone)]
 struct MonitorSnapshot {
-    data_url: String,
+    data_url: String, // 改回 Base64 字符串
     x: i32, y: i32, w: u32, h: u32,
     scale_factor: f32,
 }
@@ -112,7 +112,6 @@ async fn capture_current_monitor_snapshot() -> Result<(), String> {
     let screens = Monitor::all().map_err(|e| e.to_string())?;
     let (mx, my) = get_mouse_pos();
     
-    // 找到包含鼠标的显示器 (安全修复：使用 ? 抛出错误而不是 unwrap 崩溃)
     let monitor = screens.iter().find(|m| {
         mx >= m.x() && mx < m.x() + m.width() as i32 &&
         my >= m.y() && my < m.y() + m.height() as i32
@@ -120,15 +119,17 @@ async fn capture_current_monitor_snapshot() -> Result<(), String> {
 
     let image = monitor.capture_image().map_err(|e| e.to_string())?;
     
-    // [性能优化] 强制使用 BMP 格式 (无压缩，编码极快) + 内存存储
+    // [修复全黑 & 优化内存] 
+    // 不再存文件(避开权限问题)，而是转为 PNG 格式的 Base64 (比 BMP 小10倍以上)
     let mut buf = Vec::new();
     let mut cursor = Cursor::new(&mut buf);
-    image.write_to(&mut cursor, ImageFormat::Bmp).map_err(|e| e.to_string())?;
+    // 关键改动：这里使用 Png 而不是 Bmp
+    image.write_to(&mut cursor, ImageFormat::Png).map_err(|e| e.to_string())?;
     
     let base64_str = general_purpose::STANDARD.encode(buf);
 
     let snapshot = MonitorSnapshot {
-        data_url: format!("data:image/bmp;base64,{}", base64_str),
+        data_url: format!("data:image/png;base64,{}", base64_str), // 注意这里是 image/png
         x: monitor.x(),
         y: monitor.y(),
         w: monitor.width(),
@@ -136,7 +137,6 @@ async fn capture_current_monitor_snapshot() -> Result<(), String> {
         scale_factor: monitor.scale_factor(),
     };
 
-    // 存入全局互斥锁，等待子窗口读取
     *PENDING_SNAPSHOT.lock().unwrap() = Some(snapshot);
     
     Ok(())
@@ -1584,7 +1584,7 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
                 r#type: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT { 
-                        wVk: VIRTUAL_KEY(vk), // 仍保留 VK 以兼容部分应用
+                        wVk: VIRTUAL_KEY(0),  // [修复] 设为 0，强制使用扫描码，绕过中文输入法拦截
                         wScan: scan_code,     // [重点] 物理扫描码
                         dwFlags: flags,       // [重点] 标记为使用扫描码
                         time: 0, 

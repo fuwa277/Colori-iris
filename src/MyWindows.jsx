@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'; // 增加 convertFileSrc
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { PhysicalSize } from '@tauri-apps/api/dpi';
+import { PhysicalSize, PhysicalPosition } from '@tauri-apps/api/dpi'; // [修复] 引入 PhysicalPosition
 import { listen, emit } from '@tauri-apps/api/event';
 import { Pin, X, Pipette, Layers, Crop, FlipHorizontal, Scan } from 'lucide-react';
 import { LUMA_ALGORITHMS, hexToRgb } from './colorLogic';
@@ -28,19 +28,11 @@ export const ScreenPickerWindow = () => {
     useEffect(() => {
         const init = async () => {
             try {
-                // [性能优化] 直接从后端内存获取快照数据 (BMP Base64)
+                // 后端现在返回的是优化后的 PNG Base64，直接使用即可
                 const snapshotData = await invoke('fetch_pending_snapshot');
                 
-                // 调整窗口位置以匹配截图区域 (多屏支持)
-                // 注意：snapshotData 中的 x,y 是物理坐标，需要转为逻辑坐标给 WebviewWindow
-                const scale = snapshotData.scale_factor || 1;
-                const logicalX = snapshotData.x / scale;
-                const logicalY = snapshotData.y / scale;
-                const logicalW = snapshotData.w / scale;
-                const logicalH = snapshotData.h / scale;
-
-                await appWindow.setPosition(new window.__TAURI__.dpi.LogicalPosition(logicalX, logicalY));
-                await appWindow.setSize(new window.__TAURI__.dpi.LogicalSize(logicalW, logicalH));
+                await appWindow.setPosition(new PhysicalPosition(snapshotData.x, snapshotData.y));
+                await appWindow.setSize(new PhysicalSize(snapshotData.w, snapshotData.h));
 
                 setSnapshot(snapshotData);
                 setTimeout(() => appWindow.show().then(() => appWindow.setFocus()), 50);
@@ -550,7 +542,8 @@ export const MonitorWindow = () => {
 
             {/* 悬浮控制栏 - 移除了 showControls 状态，完全依赖 group-hover */}
             <div 
-                className="absolute top-2 right-2 z-[60] flex flex-col items-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                // [修复UI] 增加 scale-90 和 origin-top-right，防止在高DPI小窗口下UI溢出
+                className="absolute top-2 right-2 z-[60] flex flex-col items-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200 origin-top-right scale-90"
                 onMouseDown={(e) => e.stopPropagation()} 
             >
                 {/* 优化: 移除 backdrop-blur 提升渲染性能 */}
@@ -561,18 +554,20 @@ export const MonitorWindow = () => {
                             setIsMirror(newVal);
                             invoke('update_wgc_mirror', { label: appWindow.label, mirror: newVal });
                         }} 
-                        className={`p-1.5 rounded transition ${isMirror ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
+                        // [修复UI] p-1.5 -> p-1
+                        className={`p-1 rounded transition ${isMirror ? 'bg-indigo-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
                         title="镜像 (Mirror)"
                      >
-                        <FlipHorizontal size={14}/>
+                        {/* [修复UI] size 14 -> 12 */}
+                        <FlipHorizontal size={12}/>
                      </button>
 
                      <button 
                         onClick={() => { setIsGray(!isGray); }} 
-                        className={`p-1.5 rounded transition ${isGray ? 'bg-purple-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
+                        className={`p-1 rounded transition ${isGray ? 'bg-purple-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
                         title="灰度 (Gray)"
                      >
-                        <Layers size={14}/>
+                        <Layers size={12}/>
                      </button>
                      
                      <div className="w-[1px] h-4 bg-white/20 my-auto mx-0.5"></div>
@@ -582,18 +577,18 @@ export const MonitorWindow = () => {
                              const newState = !isTopmost; setIsTopmost(newState);
                              invoke('set_window_topmost', { label: appWindow.label, topmost: newState });
                         }} 
-                        className={`p-1.5 rounded transition ${isTopmost ? 'bg-green-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
+                        className={`p-1 rounded transition ${isTopmost ? 'bg-green-600 text-white' : 'text-gray-300 hover:bg-white/20'}`}
                         title="置顶 (Pin)"
                      >
-                        <Pin size={14} className={isTopmost ? "fill-current" : ""}/>
+                        <Pin size={12} className={isTopmost ? "fill-current" : ""}/>
                      </button>
 
                      <button 
                         onClick={handleHide} 
-                        className="p-1.5 rounded text-gray-300 hover:bg-red-600 hover:text-white transition"
+                        className="p-1 rounded text-gray-300 hover:bg-red-600 hover:text-white transition"
                         title="隐藏 (Hide)"
                      >
-                        <X size={14}/>
+                        <X size={12}/>
                      </button>
                 </div>
                 
@@ -687,10 +682,20 @@ export const SelectorWindow = () => {
             h: physH
         };
 
+        // [Fix] 额外计算一份逻辑坐标，专门用于前端窗口定位，解决高DPI下窗口跑偏问题
+        // dpr (monitorScale) 是当前屏幕的缩放比例
+        const logicalRect = {
+            x: Math.round(physicalRect.x / dpr),
+            y: Math.round(physicalRect.y / dpr),
+            w: Math.round(physicalRect.w / dpr),
+            h: Math.round(physicalRect.h / dpr)
+        };
+
         await appWindow.hide();
         setTimeout(async () => {
             await emit('region-selected', { 
                 ...physicalRect, 
+                logical: logicalRect, // 将逻辑坐标一同发送
                 purpose: window.location.search.includes('mode=monitor') ? 'monitor' : 'screenshot' 
             });
             appWindow.close();
@@ -789,7 +794,7 @@ export const ReferenceWindow = () => {
     const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
     const [isDraggingView, setIsDraggingView] = useState(false);
 
-    // [修复 Issue 1 & 4] 加载图片逻辑重构
+    // [修复] 改回 Base64 读取模式，解决 Asset 协议在临时目录的权限问题导致的裂图
     const loadRefImage = async (pathOrUrl) => {
         if (!pathOrUrl) return;
         
@@ -799,14 +804,12 @@ export const ReferenceWindow = () => {
             return;
         }
 
-        // 如果是本地路径，调用后端读取 Base64，彻底解决 asset 协议裂图问题
         try {
+            // 调用后端直接读取文件数据，绕过 Asset Scope 限制
             const base64 = await invoke('read_image_as_base64', { path: pathOrUrl });
             setImgSrc(base64);
         } catch (e) {
-            console.error("Load ref failed:", e);
-            // 失败时尝试回退到 asset 协议 (通常不会走到这)
-            import('@tauri-apps/api/core').then(({ convertFileSrc }) => setImgSrc(convertFileSrc(pathOrUrl)));
+            console.error("Load Ref Failed:", e);
         }
     };
 

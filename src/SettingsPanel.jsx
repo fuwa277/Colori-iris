@@ -202,10 +202,13 @@ export const SettingsPanel = ({
                 </div>
                 
                 <div className={`mt-2 pt-2 border-t border-gray-500/10 space-y-3`}>
-                    {/* [优化] 增加管理员权限提示 */}
-                    <div className="bg-yellow-500/10 border border-yellow-500/20 rounded p-2 mb-2">
+                    {/* [优化] 增加管理员权限提示 & 输入法警告 */}
+                    <div className="bg-yellow-500/10 border border-yellow-500/20 rounded p-2 mb-2 flex flex-col gap-1.5">
                         <span className="text-[9px] text-yellow-500/80 flex gap-1 leading-tight">
                             ⚠️ {t('提示：如果吸色在 Photoshop 等软件中不生效，请尝试以“管理员身份运行”本软件。', 'Tip: Run as Administrator if sync fails in apps like Photoshop.')}
+                        </span>
+                        <span className="text-[9px] text-yellow-500/80 flex gap-1 leading-tight pl-3.5 opacity-90">
+                            * {t('建议“目标软件取色键”避开有字母的快捷键，以免触发输入法。', 'Avoid letters or Modifier+Letter to prevent conflicts. ')}
                         </span>
                     </div>
 
@@ -322,7 +325,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.4 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.5 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

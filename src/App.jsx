@@ -444,10 +444,7 @@ const openSelectorWindow = async (label, url) => {
               } else setIsGrayscale(p => !p);
           }
           if (e.payload === 'pick') {
-              // 修复: 即使最小化也要先还原并置顶
-              if (await appWindow.isMinimized()) await appWindow.unminimize();
-              await appWindow.show();
-              await appWindow.setFocus();
+              // [优化] 移除主窗口强制置顶，防止遮挡绘画软件
               
               // [修改] 全局快捷键同样触发新的高性能取色器
               if (!window._isPicking) {
@@ -471,7 +468,7 @@ const openSelectorWindow = async (label, url) => {
               }
           }
           if (e.payload === 'monitor') {
-              await appWindow.setFocus();
+              // [优化] 仅开启吸色状态，不抢占焦点
               setIsPickingPixel(true);
           }
           if (e.payload === 'region') {
@@ -661,15 +658,21 @@ const openSelectorWindow = async (label, url) => {
              try {
                 await new Promise(r => setTimeout(r, 200)); 
                 setTimeout(async () => {
+                    // 1. 截图使用【物理坐标】(rect.x)，保证像素点对齐
                     const dataUrl = await invoke('capture_region', { 
                         x: Math.round(rect.x), y: Math.round(rect.y), 
                         w: Math.round(rect.w), h: Math.round(rect.h) 
                     });
                     localStorage.setItem('ref-temp-img', dataUrl);
+
+                    // 2. 窗口定位使用【逻辑坐标】(rect.logical)，防止系统二次缩放导致偏移
+                    // 如果逻辑坐标不存在(旧版兼容)，回退到 rect
+                    const pos = rect.logical || rect;
+
                     new WebviewWindow(`ref-${Date.now()}`, {
                         url: 'index.html', title: 'Ref',
-                        x: Math.round(rect.x), y: Math.round(rect.y), 
-                        width: Math.round(rect.w), height: Math.round(rect.h),
+                        x: Math.round(pos.x), y: Math.round(pos.y), 
+                        width: Math.round(pos.w), height: Math.round(pos.h),
                         decorations: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: true
                     });
                 }, 200);
