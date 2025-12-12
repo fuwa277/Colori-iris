@@ -533,10 +533,24 @@ fn save_temp_image(data_url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn clean_temp_images() {
+fn clean_temp_images(keep_files: Vec<String>) {
     let temp_dir = std::env::temp_dir().join("colori_temp");
     if temp_dir.exists() {
-        let _ = std::fs::remove_dir_all(temp_dir);
+        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    // 如果文件路径不在保留列表中，则删除
+                    // 注意：需处理路径分隔符差异，这里简单比对字符串包含关系
+                    let path_str = path.to_string_lossy().to_string();
+                    let should_keep = keep_files.iter().any(|k| path_str.contains(k) || k.contains(&path_str));
+                    
+                    if !should_keep {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1792,7 +1806,7 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     })
     .setup(|app| {
         // --- 托盘初始化逻辑 ---
-        clean_temp_images();
+        // clean_temp_images(); // [修改] 移除启动自动全删，交由前端 App.jsx 控制智能清理
 
         let show_i = MenuItem::with_id(app, "show", "显示界面 (Show)", true, None::<&str>)?;
         let reset_i = MenuItem::with_id(app, "reset", "重置位置 (Reset Pos)", true, None::<&str>)?;

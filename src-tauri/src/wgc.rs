@@ -20,7 +20,8 @@ use windows::{
                 DXGI_SWAP_EFFECT_FLIP_DISCARD, 
                 DXGI_USAGE_RENDER_TARGET_OUTPUT, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS,
             },
-            Gdi::{MonitorFromWindow, MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY},
+            // [修复] 引入 GetMonitorInfoW 和 MONITORINFO 以支持多屏坐标转换
+            Gdi::{MonitorFromWindow, MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY, GetMonitorInfoW, MONITORINFO},
         },
         System::WinRT::{
             Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
@@ -152,12 +153,31 @@ impl WgcSession {
 
         let item = if is_region {
             let hmonitor = unsafe { 
-                if let Some(rect) = self.source_rect {
-                    // 如果是区域模式，使用选区左上角坐标寻找所在的显示器
+                if let Some(mut rect) = self.source_rect {
+                    // 1. 找到所在的显示器
                     let pt = POINT { x: rect.left, y: rect.top };
-                    MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+                    let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+                    
+                    // 2. [关键修复] 获取该显示器的全局位置
+                    let mut info = MONITORINFO::default();
+                    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                    if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                        // 3. 将全局坐标转换为相对于该显示器的局部坐标
+                        // 例如：副屏从 x=1920 开始，选区在 x=2000
+                        // 局部 x = 2000 - 1920 = 80
+                        let offset_x = info.rcMonitor.left;
+                        let offset_y = info.rcMonitor.top;
+                        
+                        rect.left -= offset_x;
+                        rect.right -= offset_x;
+                        rect.top -= offset_y;
+                        rect.bottom -= offset_y;
+                        
+                        // 更新修正后的裁剪区域
+                        self.source_rect = Some(rect);
+                    }
+                    monitor
                 } else {
-                    // 兜底逻辑
                     let base_hwnd = if target_hwnd == 0 { GetDesktopWindow() } else { HWND(target_hwnd as _) };
                     MonitorFromWindow(base_hwnd, MONITOR_DEFAULTTOPRIMARY) 
                 }
@@ -509,7 +529,8 @@ fn render_frame(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame, ctx:
                 Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                // [修复] 移除 D3D11_BIND_RENDER_TARGET，只保留 SHADER_RESOURCE
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
             };
@@ -523,6 +544,8 @@ fn render_frame(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame, ctx:
         if let Some(dest) = &ctx.intermediate_texture {
             if !is_minimized {
                 ctx.d3d_context.CopyResource(dest, &source_texture);
+                // [关键修复] 强制刷新指令管道，解决双显卡下的蓝色条纹/画面撕裂问题
+                ctx.d3d_context.Flush();
             }
         }
     }

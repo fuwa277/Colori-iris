@@ -35,28 +35,78 @@ try {
  * MAIN APP
  */
 export default function App() {
-  const { colorBlockRef } = useTauriBackend();
-
-  // --- 基础 Hooks 和 状态 ---
-  // 主窗口关闭事件监听
+  // [新增] 参考图记忆恢复逻辑 (放在组件顶部)
   useEffect(() => {
-      const handleClose = async (e) => {
-          // 通知所有画中画窗口关闭
-          await emit('main-window-closed');
-          // 允许主窗口关闭
+      // [关键修复] 仅在主窗口执行恢复逻辑，防止子窗口(参考图)启动时递归创建导致死循环
+      if (appWindow.label !== 'main') return;
+
+      const initRefRecovery = async () => {
+          const shouldRemember = JSON.parse(localStorage.getItem('colori_remember_refs') || 'false');
+          let keepList = [];
+
+          if (shouldRemember) {
+              try {
+                  const savedSession = JSON.parse(localStorage.getItem('colori_ref_session_data') || '{}');
+                  console.log("Restoring refs:", savedSession);
+                  
+                  // 1. 收集需要保留的文件路径
+                  Object.values(savedSession).forEach(item => {
+                      if (item.path && !item.path.startsWith('http')) {
+                          keepList.push(item.path);
+                      }
+                  });
+
+                  // 2. 清理其他垃圾文件 (传入保留列表)
+                  await invoke('clean_temp_images', { keepFiles: keepList });
+
+                  // 3. 恢复窗口
+                  Object.entries(savedSession).forEach(([label, data], idx) => {
+                      // 稍微错开启动时间，防止瞬时压力过大
+                      setTimeout(() => {
+                          try {
+                              new WebviewWindow(`ref-restored-${Date.now()}-${idx}`, {
+                                  url: `index.html?path=${encodeURIComponent(data.path)}`, 
+                                  title: 'Ref',
+                                  x: data.x, y: data.y, width: data.w, height: data.h,
+                                  decorations: false, transparent: true, alwaysOnTop: data.isTopmost ?? true, 
+                                  skipTaskbar: false
+                              });
+                          } catch(e) { console.error("Restore win failed", e); }
+                      }, idx * 100);
+                  });
+              } catch(e) { console.error("Ref recovery failed", e); }
+          } else {
+              //如果不记忆，则清空所有临时文件
+              await invoke('clean_temp_images', { keepFiles: [] });
+          }
       };
-  
-      const unlistenClose = appWindow.onCloseRequested(handleClose);
-      
-      const prevent = (e) => e.preventDefault();
-      window.addEventListener('dragover', prevent);
-      window.addEventListener('drop', prevent);
-      
+      // 延时执行，确保后端就绪
+      setTimeout(initRefRecovery, 500);
+
+      // 监听子窗口汇报
+      const unlistenReport = listen('ref-report-state', (e) => {
+          const { label, ...data } = e.payload;
+          refSessionRef.current[label] = data;
+          // 防抖写入本地存储
+          if (window._saveRefTimer) clearTimeout(window._saveRefTimer);
+          window._saveRefTimer = setTimeout(() => {
+              if (JSON.parse(localStorage.getItem('colori_remember_refs') || 'false')) {
+                  localStorage.setItem('colori_ref_session_data', JSON.stringify(refSessionRef.current));
+              }
+          }, 1000);
+      });
+
+      // 监听子窗口关闭
+      const unlistenClosed = listen('ref-window-closed', (e) => {
+          const { label } = e.payload;
+          delete refSessionRef.current[label];
+          localStorage.setItem('colori_ref_session_data', JSON.stringify(refSessionRef.current));
+      });
+
       return () => {
-          unlistenClose.then(f => f());
-          window.removeEventListener('dragover', prevent);
-          window.removeEventListener('drop', prevent);
-      };
+          unlistenReport.then(f=>f());
+          unlistenClosed.then(f=>f());
+      }
   }, []);
 
 // 辅助函数：打开覆盖全屏的选区窗口
@@ -210,6 +260,10 @@ const openSelectorWindow = async (label, url) => {
   // [需求1] 监控同步开关
   const [monitorSync, setMonitorSync] = useState(false);
   const [isPickingPixel, setIsPickingPixel] = useState(false);
+  
+  // [新增] 参考图记忆相关状态
+  const [rememberRefs, setRememberRefs] = useState(() => loadState('colori_remember_refs', false));
+  const refSessionRef = useRef({}); // 使用 Ref 存储瞬时状态，避免频繁重渲染
 
   // [新增] WGC 支持检测 (用于 App 级调用)
   const [wgcSupported, setWgcSupported] = useState(true);
@@ -283,6 +337,8 @@ const openSelectorWindow = async (label, url) => {
   // 配色刷新按钮独立种子
   const [randomSeed, setRandomSeed] = useState(0);
   const [similarSeed, setSimilarSeed] = useState(0);
+  // [修复 UI] 清除历史的确认状态
+  const [clearHistoryConfirm, setClearHistoryConfirm] = useState(false);
   
   // 修复: 系统滤镜切换冷却锁，防止轮询覆盖手动操作
   const lastGrayToggleRef = useRef(0);
@@ -663,14 +719,18 @@ const openSelectorWindow = async (label, url) => {
                         x: Math.round(rect.x), y: Math.round(rect.y), 
                         w: Math.round(rect.w), h: Math.round(rect.h) 
                     });
-                    localStorage.setItem('ref-temp-img', dataUrl);
+                    
+                    // [修复] 将截图保存为临时文件，通过 URL 传递，解决透明框问题
+                    const filePath = await invoke('save_temp_image', { dataUrl });
 
                     // 2. 窗口定位使用【逻辑坐标】(rect.logical)，防止系统二次缩放导致偏移
                     // 如果逻辑坐标不存在(旧版兼容)，回退到 rect
                     const pos = rect.logical || rect;
 
                     new WebviewWindow(`ref-${Date.now()}`, {
-                        url: 'index.html', title: 'Ref',
+                        // [修复] 传递 path 参数
+                        url: `index.html?path=${encodeURIComponent(filePath)}`, 
+                        title: 'Ref',
                         x: Math.round(pos.x), y: Math.round(pos.y), 
                         width: Math.round(pos.w), height: Math.round(pos.h),
                         decorations: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: true
@@ -809,7 +869,16 @@ const openSelectorWindow = async (label, url) => {
           case 'screen':
               return <ScreenPanel isDark={isDark} lang={lang} sources={monitorSources} setSources={setMonitorSources} />;
           case 'push':
-              return <RefPanel isDark={isDark} t={t} refIgnoreMouse={refIgnoreMouse} setRefIgnoreMouse={setRefIgnoreMouse} />;
+              return <RefPanel 
+                  isDark={isDark} t={t} 
+                  refIgnoreMouse={refIgnoreMouse} setRefIgnoreMouse={setRefIgnoreMouse}
+                  rememberRefs={rememberRefs} 
+                  setRememberRefs={(val) => {
+                      setRememberRefs(val);
+                      localStorage.setItem('colori_remember_refs', JSON.stringify(val));
+                      if(!val) localStorage.removeItem('colori_ref_session_data'); // 关闭时清空数据
+                  }}
+              />;
           case 'settings':
               return <SettingsPanel 
                   isDark={isDark} 
@@ -998,7 +1067,7 @@ const openSelectorWindow = async (label, url) => {
 
                             {/* Palette Tab */}
                             <div className={`absolute inset-0 overflow-y-auto custom-scrollbar ${subTab === 'palette' ? 'block' : 'hidden'}`}>
-                                <div className="animate-in fade-in space-y-4 pt-1">
+                                <div className="animate-in fade-in space-y-4 pt-1 px-1"> {/* 增加 px-1 防止 flex 溢出 */}
                                     <div>
                                         <div className="flex justify-between items-center mb-2">
                                             <span className="text-[10px] font-bold opacity-50 uppercase">{t('收藏', 'Saved')}</span>
@@ -1007,18 +1076,43 @@ const openSelectorWindow = async (label, url) => {
                                                 + ADD
                                             </button>
                                         </div>
-                                        <div className="grid grid-cols-8 gap-1.5"> 
+                                        {/* [修复] 使用 Flex Wrap + 固定尺寸 (w-6 h-6)，防止随窗口拉伸 */}
+                                        <div className="flex flex-wrap gap-1.5"> 
                                             {savedPalette.map((hex, i) => (
-                                                <div key={i} className="aspect-square rounded-sm cursor-pointer relative group hover:scale-110 transition-transform shadow-sm box-border border border-gray-400/30" style={{ background: hex }} onClick={() => { const c = hexToRgb(hex); if(c) handleRgbChange(c); }} onContextMenu={(e) => { e.preventDefault(); setSavedPalette(prev => prev.filter((_, idx) => idx !== i)); }} />
+                                                <div key={i} className="w-6 h-6 rounded-sm cursor-pointer relative group hover:scale-110 transition-transform shadow-sm box-border border border-gray-400/30" style={{ background: hex }} onClick={() => { const c = hexToRgb(hex); if(c) handleRgbChange(c); }} onContextMenu={(e) => { e.preventDefault(); setSavedPalette(prev => prev.filter((_, idx) => idx !== i)); }} />
                                             ))}
                                         </div>
                                         {savedPalette.length === 0 && <div className="text-[9px] opacity-20 text-center py-2">Empty</div>}
                                     </div>
                                     <div>
-                                        <div className="text-[10px] font-bold opacity-50 uppercase mb-2">{t('历史', 'History')}</div>
-                                        <div className="grid grid-cols-8 gap-1">
+                                        <div className="flex justify-between items-center mb-2">
+                                            <span className="text-[10px] font-bold opacity-50 uppercase">{t('历史', 'History')}</span>
+                                            {/* [修复 UI] 美化清空按钮：支持点击别处取消(onBlur) + 3秒自动恢复 */}
+                                            <button 
+                                                onBlur={() => setClearHistoryConfirm(false)} // [新增] 失去焦点(点击别处)时立即取消
+                                                onClick={() => { 
+                                                    if (clearHistoryConfirm) {
+                                                        setPaletteHistory([]);
+                                                        setClearHistoryConfirm(false);
+                                                    } else {
+                                                        setClearHistoryConfirm(true);
+                                                        // 3秒后自动恢复作为兜底
+                                                        setTimeout(() => setClearHistoryConfirm(false), 3000);
+                                                    }
+                                                }} 
+                                                className={`px-2 py-0.5 rounded border text-[9px] transition font-bold ${
+                                                    clearHistoryConfirm 
+                                                    ? 'bg-red-500 border-red-500 text-white' 
+                                                    : 'bg-slate-500/10 border-slate-500/20 text-slate-500 hover:bg-slate-500/20'
+                                                }`}
+                                            >
+                                                {clearHistoryConfirm ? t('确定清除?', 'Confirm?') : t('清除', 'CLEAR')}
+                                            </button>
+                                        </div>
+                                        {/* [修复] 使用 Flex Wrap + 固定尺寸 */}
+                                        <div className="flex flex-wrap gap-1">
                                             {paletteHistory.map((hex, i) => (
-                                                <div key={i} className="aspect-square rounded-sm cursor-pointer hover:scale-110 transition-transform" style={{ background: hex }} onClick={() => { const c = hexToRgb(hex); if(c) handleRgbChange(c); }} title={hex} />
+                                                <div key={i} className="w-6 h-6 rounded-sm cursor-pointer hover:scale-110 transition-transform border border-black/5" style={{ background: hex }} onClick={() => { const c = hexToRgb(hex); if(c) handleRgbChange(c); }} title={hex} />
                                             ))}
                                         </div>
                                     </div>

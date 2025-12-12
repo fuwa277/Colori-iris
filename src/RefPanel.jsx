@@ -5,7 +5,8 @@ import { invoke } from '@tauri-apps/api/core'; // Fix 8
 // import { readImage } from '@tauri-apps/plugin-clipboard-manager'; 
 import { Copy, Crop, Image as ImageIcon } from 'lucide-react';
 
-export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse }) => {
+// [修复] 接收 rememberRefs, setRememberRefs
+export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse, rememberRefs, setRememberRefs }) => {
     // 错误提示状态管理
     const [errorMsg, setErrorMsg] = useState(null);
     const timerRef = useRef(null);
@@ -32,18 +33,33 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse }) => {
                 </div>
             )}
 
-            <div className={`p-4 rounded-xl border ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'} flex items-center justify-between`}>
-                <div className="flex flex-col max-w-[80%]">
-                    <span className="text-xs font-bold">{t('鼠标穿透模式', 'Click-Through')}</span>
-                    <span className="text-[9px] opacity-50 leading-tight mt-0.5">
-                        {t('开启后窗口将完全忽略鼠标事件', 'Window ignores all events.')}
-                        <br/>
-                        {t('(需在面板关闭穿透以恢复控制)', '(Toggle off here to control)')}
-                    </span>
+            {/* [优化] 开关组：并排布局 */}
+            <div className="grid grid-cols-2 gap-3">
+                {/* 1. 记忆参考图 */}
+                <div className={`p-3 rounded-xl border flex flex-col justify-between h-full ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold whitespace-nowrap">{t('记忆参考', 'Restore')}</span>
+                        <button onClick={() => setRememberRefs(!rememberRefs)} className={`w-8 h-4 shrink-0 rounded-full relative transition-colors ${rememberRefs ? 'bg-teal-600' : 'bg-gray-500/50'}`}>
+                            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow-sm transition-all ${rememberRefs ? 'left-[18px]' : 'left-[2px]'}`} />
+                        </button>
+                    </div>
+                    <div className="text-[9px] opacity-50 leading-tight">
+                        {t('重启后自动恢复上次未关闭的窗口', 'Reopen windows on startup')}
+                    </div>
                 </div>
-                <button onClick={() => setRefIgnoreMouse(!refIgnoreMouse)} className={`w-10 h-5 rounded-full relative transition-colors shrink-0 ${refIgnoreMouse ? 'bg-slate-500' : 'bg-gray-500/50'}`} title={t("切换所有参考窗口的鼠标穿透", "Toggle for all ref windows")}>
-                    <div className={`absolute top-1 w-3 h-3 bg-white rounded-full shadow-sm transition-all ${refIgnoreMouse ? 'left-6' : 'left-1'}`} />
-                </button>
+
+                {/* 2. 鼠标穿透 */}
+                <div className={`p-3 rounded-xl border flex flex-col justify-between h-full ${isDark?'bg-white/5 border-white/5':'bg-black/5 border-black/5'}`}>
+                    <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold whitespace-nowrap">{t('鼠标穿透', 'Pass-Thru')}</span>
+                        <button onClick={() => setRefIgnoreMouse(!refIgnoreMouse)} className={`w-8 h-4 shrink-0 rounded-full relative transition-colors ${refIgnoreMouse ? 'bg-slate-500' : 'bg-gray-500/50'}`} title={t("切换所有参考窗口的鼠标穿透", "Toggle for all ref windows")}>
+                            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow-sm transition-all ${refIgnoreMouse ? 'left-[18px]' : 'left-[2px]'}`} />
+                        </button>
+                    </div>
+                    <div className="text-[9px] opacity-50 leading-tight">
+                        {t('开启后忽略鼠标事件(在此处关闭)', 'Ignores events. Toggle off here to control.')}
+                    </div>
+                </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

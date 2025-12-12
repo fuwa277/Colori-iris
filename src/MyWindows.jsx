@@ -405,7 +405,8 @@ export const MonitorWindow = () => {
 
                  if (aspectRatio > 0) {
                      const currentRatio = size.width / size.height;
-                     if (Math.abs(currentRatio - aspectRatio) > 0.05) {
+                     // [修复] 阈值从 5% 降至 0.2%，几乎消除肉眼可见的拉伸形变
+                     if (Math.abs(currentRatio - aspectRatio) > 0.002) {
                          const newHeight = Math.round(size.width / aspectRatio);
                          appWindow.setSize(new PhysicalSize(size.width, newHeight)).catch(()=>{});
                      }
@@ -786,6 +787,7 @@ export const SelectorWindow = () => {
 // --- 独立窗口：参考图 ---
 export const ReferenceWindow = () => {
     const [imgSrc, setImgSrc] = useState(null);
+    const [originalPath, setOriginalPath] = useState(null); // [Fix] 新增状态：存储原始路径
     const [isTopmost, setIsTopmost] = useState(true);
     const [isGray, setIsGray] = useState(false); 
     const [opacity, setOpacity] = useState(100);
@@ -798,14 +800,19 @@ export const ReferenceWindow = () => {
     const loadRefImage = async (pathOrUrl) => {
         if (!pathOrUrl) return;
         
-        // 如果是 Base64 或 http 链接直接显示
+        // [Fix] 如果是本地文件路径（非 Base64/HTTP），记录下来用于保存
+        if (!pathOrUrl.startsWith('data:')) {
+            setOriginalPath(pathOrUrl);
+        }
+
+        // If Base64 or http, show directly
         if (pathOrUrl.startsWith('data:') || pathOrUrl.startsWith('http')) {
             setImgSrc(pathOrUrl);
             return;
         }
 
         try {
-            // 调用后端直接读取文件数据，绕过 Asset Scope 限制
+            // Call backend to read file as Base64
             const base64 = await invoke('read_image_as_base64', { path: pathOrUrl });
             setImgSrc(base64);
         } catch (e) {
@@ -827,7 +834,8 @@ export const ReferenceWindow = () => {
             
             if (tempPath) {
                 loadRefImage(tempPath);
-                localStorage.removeItem('ref-temp-path');
+                // [修改] 保留路径，供记忆功能使用
+                // localStorage.removeItem('ref-temp-path'); 
             } else if (tempImg) {
                 setImgSrc(tempImg);
                 localStorage.removeItem('ref-temp-img');
@@ -871,6 +879,35 @@ export const ReferenceWindow = () => {
             setView(v => ({ ...v, x: v.x + e.movementX, y: v.y + e.movementY }));
         }
     };
+
+    // [新增] 状态汇报逻辑 (用于记忆功能)
+    useEffect(() => {
+        // 防抖汇报
+        const timer = setTimeout(async () => {
+            if (imgSrc && !imgSrc.startsWith('http')) { // 仅记忆本地/临时文件
+                try {
+                    const pos = await appWindow.outerPosition();
+                    const size = await appWindow.innerSize();
+                    emit('ref-report-state', {
+                        label: appWindow.label,
+                        // [Fix] 优先保存原始文件路径。如果只存了 imgSrc (Base64)，会导致重启时 URL 过长崩溃
+                        path: originalPath || (imgSrc.startsWith('http') ? imgSrc : null), 
+                        x: pos.x, y: pos.y, w: size.width, h: size.height,
+                        opacity, isGray, isTopmost, ignoreMouse, view
+                    });
+                } catch(e) {}
+            }
+        }, 500);
+        return () => clearTimeout(timer);
+    }, [imgSrc, opacity, isGray, isTopmost, ignoreMouse, view]);
+
+    // 窗口关闭时发送销毁事件
+    useEffect(() => {
+        const unlisten = appWindow.onCloseRequested(() => {
+            emit('ref-window-closed', { label: appWindow.label });
+        });
+        return () => { unlisten.then(f => f()); };
+    }, []);
 
     return (
         <div className="w-full h-full relative group overflow-hidden bg-transparent"
