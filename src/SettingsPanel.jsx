@@ -90,6 +90,17 @@ export const SettingsPanel = ({
                 </div>
             </div>
 
+            {/* [需求1] 界面布局设置 */}
+            <div className={`flex items-center justify-between p-3 rounded-xl mb-4 ${isDark?'bg-white/5':'bg-black/5'}`}>
+                <div className="flex flex-col">
+                    <span className="text-xs">{t('左手模式 (镜像布局)', 'Left-Handed Mode')}</span>
+                    <span className="text-[9px] opacity-50">{t('开启后镜像显示色轮区域的按键排布', 'Mirror layout for right-handed pen display users')}</span>
+                </div>
+                <button onClick={() => setSettings({...settings, leftHanded: !settings.leftHanded})} className={`w-8 h-4 rounded-full flex items-center px-0.5 transition-colors ${settings.leftHanded ? 'bg-blue-500' : 'bg-gray-500/30'}`}>
+                    <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.leftHanded ? 'translate-x-4' : 'translate-x-0'}`} />
+                </button>
+            </div>
+
             {/* 快捷键设置 */}
             <div className={`p-3 rounded-xl ${isDark?'bg-white/5':'bg-black/5'} space-y-2`}>
                 <div className="flex justify-between items-center mb-1 pb-1 border-b border-gray-500/10">
@@ -325,7 +336,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.7 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.8 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

@@ -1406,12 +1406,13 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
                 if (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0 { mods |= 4; }
                 if (GetAsyncKeyState(0x5B) as u16 & 0x8000) != 0 { mods |= 8; } // VK_LWIN
 
+                // [修复] 提到最外层：如果在录制热键，跳过所有全局快捷键触发
+                if IS_RECORDING_HOTKEY.load(Ordering::Relaxed) {
+                    continue; 
+                }
+
                 // 1. Sync Macro Check
                 if SYNC_ENABLED.load(Ordering::Relaxed) {
-                    // [新增] 关键检查：如果在录制热键，则跳过触发检查
-                    if IS_RECORDING_HOTKEY.load(Ordering::Relaxed) {
-                        continue; 
-                    }
                     let code = SYNC_HOTKEY.load(Ordering::Relaxed);
                     let target_mods = SYNC_MODS.load(Ordering::Relaxed);
                     if code != 0 {

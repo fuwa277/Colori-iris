@@ -35,6 +35,30 @@ try {
  * MAIN APP
  */
 export default function App() {
+  const { colorBlockRef } = useTauriBackend();
+
+  // --- 基础 Hooks 和 状态 ---
+  // 主窗口关闭事件监听 & 阻止默认拖拽
+  useEffect(() => {
+      const handleClose = async (e) => {
+          // 通知所有画中画窗口关闭
+          await emit('main-window-closed');
+          // 允许主窗口关闭
+      };
+
+      const unlistenClose = appWindow.onCloseRequested(handleClose);
+
+      const prevent = (e) => e.preventDefault();
+      window.addEventListener('dragover', prevent);
+      window.addEventListener('drop', prevent);
+
+      return () => {
+          unlistenClose.then(f => f());
+          window.removeEventListener('dragover', prevent);
+          window.removeEventListener('drop', prevent);
+      };
+  }, []);
+
   // [新增] 参考图记忆恢复逻辑 (放在组件顶部)
   useEffect(() => {
       // [关键修复] 仅在主窗口执行恢复逻辑，防止子窗口(参考图)启动时递归创建导致死循环
@@ -246,6 +270,7 @@ const openSelectorWindow = async (label, url) => {
       hotkeyRef: '',            // 新增
       globalRegion: true,       // 默认开启全局
       globalRef: true,          // 默认开启全局
+      leftHanded: false,        // [需求1] 左手模式 (镜像布局)
       hotkeySyncEnabled: false, 
       hotkeySyncApp: '', 
       hotkeySyncKey: 'Shift+F12', // 默认触发键
@@ -260,6 +285,10 @@ const openSelectorWindow = async (label, url) => {
   // [需求1] 监控同步开关
   const [monitorSync, setMonitorSync] = useState(false);
   const [isPickingPixel, setIsPickingPixel] = useState(false);
+  // [修复] 色环区域高度状态 (读取记忆，默认 240px 可容纳约 170px 色环)
+  const [pickerHeight, setPickerHeight] = useState(() => {
+      try { return parseInt(localStorage.getItem('colori_picker_height') || '240'); } catch { return 240; }
+  });
   
   // [新增] 参考图记忆相关状态
   const [rememberRefs, setRememberRefs] = useState(() => loadState('colori_remember_refs', false));
@@ -428,6 +457,8 @@ const openSelectorWindow = async (label, url) => {
   useEffect(() => localStorage.setItem('colori_theme', JSON.stringify(isDark)), [isDark]);
   useEffect(() => localStorage.setItem('colori_panel_config', JSON.stringify(panelConfig)), [panelConfig]);
   useEffect(() => localStorage.setItem('colori_lang', JSON.stringify(lang)), [lang]);
+  // [修复] 保存高度记忆
+  useEffect(() => localStorage.setItem('colori_picker_height', pickerHeight), [pickerHeight]);
   
   useEffect(() => {
       const updatedSettings = { ...settings, iccProfile };
@@ -714,25 +745,34 @@ const openSelectorWindow = async (label, url) => {
              try {
                 await new Promise(r => setTimeout(r, 200)); 
                 setTimeout(async () => {
-                    // 1. 截图使用【物理坐标】(rect.x)，保证像素点对齐
                     const dataUrl = await invoke('capture_region', { 
                         x: Math.round(rect.x), y: Math.round(rect.y), 
                         w: Math.round(rect.w), h: Math.round(rect.h) 
                     });
                     
-                    // [修复] 将截图保存为临时文件，通过 URL 传递，解决透明框问题
                     const filePath = await invoke('save_temp_image', { dataUrl });
-
-                    // 2. 窗口定位使用【逻辑坐标】(rect.logical)，防止系统二次缩放导致偏移
-                    // 如果逻辑坐标不存在(旧版兼容)，回退到 rect
                     const pos = rect.logical || rect;
 
+                    // [修复 1] 智能尺寸计算：防止因系统最小宽度限制导致图片显示不全
+                    const MIN_WIN_WIDTH = 160; // 设定一个安全的最小宽度（容纳按钮）
+                    let finalW = Math.round(rect.w);
+                    let finalH = Math.round(rect.h);
+                    const ratio = finalW / finalH;
+
+                    // 如果截图宽度小于最小宽度，强制拉大宽度，并按比例拉大高度
+                    if (finalW < MIN_WIN_WIDTH) {
+                        finalW = MIN_WIN_WIDTH;
+                        finalH = Math.round(finalW / ratio);
+                    }
+
                     new WebviewWindow(`ref-${Date.now()}`, {
-                        // [修复] 传递 path 参数
                         url: `index.html?path=${encodeURIComponent(filePath)}`, 
                         title: 'Ref',
-                        x: Math.round(pos.x), y: Math.round(pos.y), 
-                        width: Math.round(pos.w), height: Math.round(pos.h),
+                        x: Math.round(pos.x), 
+                        y: Math.round(pos.y), 
+                        // 使用计算后的 finalW / finalH
+                        width: finalW, 
+                        height: finalH,
                         decorations: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: true
                     });
                 }, 200);
@@ -891,14 +931,14 @@ const openSelectorWindow = async (label, url) => {
               />;
           case 'color':
           default:
-              // 调色板内容较多，保持在这里
               return (
-                <div className="min-h-full flex flex-col">
-                    <div className="pt-2 px-2">
+                <div className="h-full flex flex-col overflow-hidden">
+                    {/* 上半部分：色环区域 (改为 flex-1 自适应剩余空间) */}
+                    <div className="flex-1 min-h-[180px] relative shrink-0">
                         <ColorPickerArea 
                             hue={hsv.h} saturation={hsv.s} value={hsv.v} 
                             onChange={handleColorChange}
-                            onUpdateCurrent={(rgb) => handleRgbChange(rgb)} // 允许监控槽反向同步
+                            onUpdateCurrent={(rgb) => handleRgbChange(rgb)}
                             onCommit={commitToHistory}
                             pickerMode={pickerMode}
                             onToggleMode={() => setPickerMode(m => m === 'triangle' ? 'square' : 'triangle')}
@@ -907,14 +947,44 @@ const openSelectorWindow = async (label, url) => {
                             onSlotClick={setActiveSlot}
                             lang={lang} isDark={isDark}
                             monitorPos={monitorPos} setMonitorPos={setMonitorPos}
-                            monitorRgb={monitorRgb} // 传入监控色
-                            monitorSync={monitorSync} setMonitorSync={setMonitorSync} // [需求1] 传入同步状态
+                            monitorRgb={monitorRgb} 
+                            monitorSync={monitorSync} setMonitorSync={setMonitorSync}
                             isPickingPixel={isPickingPixel} setIsPickingPixel={setIsPickingPixel}
+                            leftHanded={settings.leftHanded}
                         />
                     </div>
 
-                    {/* 下半面板位置下移 */}
-                    <div className={`flex-1 min-h-0 mt-[3px] rounded-t-[24px] p-4 flex flex-col gap-4 shadow-[0_-5px_15px_rgba(0,0,0,0.1)] ${isDark ? 'bg-[#1e1e1e]' : 'bg-white'}`}>
+                    {/* 调节杆 (Resizer) - 控制下方面板高度 */}
+                    <div 
+                        className="h-1.5 -my-0.5 cursor-row-resize z-50 flex items-center justify-center group opacity-50 hover:opacity-100"
+                        onPointerDown={(e) => {
+                            e.currentTarget.setPointerCapture(e.pointerId);
+                            const startY = e.clientY;
+                            const startH = pickerHeight; // 这里复用 pickerHeight 变量名来存储下方面板高度
+                            const onMove = (ev) => {
+                                // 鼠标向下拖动(dy>0) -> 下方面板变小 -> height 减小
+                                const dy = ev.clientY - startY;
+                                const newH = Math.max(120, startH - dy); 
+                                setPickerHeight(newH);
+                            };
+                            const onUp = (ev) => {
+                                ev.currentTarget.removeEventListener('pointermove', onMove);
+                                ev.currentTarget.removeEventListener('pointerup', onUp);
+                                ev.currentTarget.releasePointerCapture(ev.pointerId);
+                            };
+                            e.currentTarget.addEventListener('pointermove', onMove);
+                            e.currentTarget.addEventListener('pointerup', onUp);
+                        }}
+                    >
+                        {/* 视觉上的细条 */}
+                        <div className="w-12 h-1 rounded-full bg-gray-400/30 group-hover:bg-blue-500/50 transition-colors" />
+                    </div>
+
+                    {/* 下半部分：面板区域 (改为受控高度) */}
+                    <div 
+                        style={{ height: pickerHeight, maxHeight: '80%' }} 
+                        className={`shrink-0 min-h-[120px] rounded-t-[20px] p-4 flex flex-col gap-4 shadow-[0_-5px_15px_rgba(0,0,0,0.1)] border-t border-white/5 ${isDark ? 'bg-[#1e1e1e]' : 'bg-white'}`}
+                    >
                         <div className="flex justify-between border-b border-gray-500/10 pb-2 shrink-0">
                             <div className="flex gap-4 text-xs font-bold">
                                 {['sketch', 'scheme', 'palette'].map(k => (

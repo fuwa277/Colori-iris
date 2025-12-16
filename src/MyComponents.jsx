@@ -155,19 +155,34 @@ export const GlobalSvgFilters = ({ icc = 'rec601' }) => {
 };
 
 // --- 色轮组件 ---
-export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurrent, onCommit, pickerMode, onToggleMode, colorSlots, activeSlot, onSlotClick, lang, isDark, monitorPos, setMonitorPos, monitorRgb, monitorSync, setMonitorSync, isPickingPixel, setIsPickingPixel }) => {
+export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurrent, onCommit, pickerMode, onToggleMode, colorSlots, activeSlot, onSlotClick, lang, isDark, monitorPos, setMonitorPos, monitorRgb, monitorSync, setMonitorSync, isPickingPixel, setIsPickingPixel, leftHanded }) => {
   const canvasRef = useRef(null);
+  const containerRef = useRef(null); 
   const [isDraggingRing, setIsDraggingRing] = useState(false);
   const [isDraggingShape, setIsDraggingShape] = useState(false);
-  // [修复] 添加 rAF 引用，用于数位板高频事件节流
   const rAfRef = useRef(null); 
   const t = (zh, en) => lang === 'zh' ? zh : en;
 
-  const size = 170; 
-  const center = size / 2;
+  const [dimensions, setDimensions] = useState({ size: 170, center: 85 });
+  const { size, center } = dimensions;
+
+  useEffect(() => {
+      if (!containerRef.current) return;
+      const obs = new ResizeObserver(entries => {
+          for (let entry of entries) {
+              const { width, height } = entry.contentRect;
+              const newSize = Math.min(width, height) - 6; 
+              const safeSize = Math.max(80, newSize); 
+              setDimensions({ size: safeSize, center: safeSize / 2 });
+          }
+      });
+      obs.observe(containerRef.current);
+      return () => obs.disconnect();
+  }, []);
+
   const outerRadius = size / 2 - 2;
-  const innerRadius = outerRadius - 12; 
-  const shapeRadius = innerRadius - 8;
+  const innerRadius = outerRadius - (size * 0.08); 
+  const shapeRadius = innerRadius - (size * 0.05); 
   const rotationOffset = -150 * (Math.PI / 180);
 
   useEffect(() => {
@@ -175,6 +190,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.clearRect(0, 0, size, size);
+    
     for (let i = 0; i < 360; i++) {
       const rad = (i * Math.PI / 180) + rotationOffset;
       const nextRad = ((i + 1.5) * Math.PI / 180) + rotationOffset;
@@ -184,6 +200,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
       ctx.strokeStyle = `hsl(${i}, 100%, 50%)`;
       ctx.stroke();
     }
+    
     ctx.save();
     ctx.beginPath();
     let vHue, vWhite, vBlack;
@@ -199,6 +216,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
         ctx.rect(vWhite.x, vWhite.y, boxSize, boxSize);
     }
     ctx.clip();
+    
     if (pickerMode === 'triangle') {
         ctx.fillStyle = `hsl(${hue}, 100%, 50%)`; ctx.fill();
         const gWhite = ctx.createLinearGradient(vWhite.x, vWhite.y, (vHue.x + vBlack.x)/2, (vHue.y + vBlack.y)/2);
@@ -212,11 +230,13 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
         gVert.addColorStop(0, 'transparent'); gVert.addColorStop(1, 'black'); ctx.fillStyle = gVert; ctx.fillRect(0,0,size,size);
     }
     ctx.restore();
+    
     const hueRad = (hue * Math.PI / 180) + rotationOffset;
     const hueX = center + ((outerRadius + innerRadius)/2) * Math.cos(hueRad);
     const hueY = center + ((outerRadius + innerRadius)/2) * Math.sin(hueRad);
     ctx.beginPath(); ctx.arc(hueX, hueY, 4, 0, 2 * Math.PI);
     ctx.strokeStyle = 'white'; ctx.lineWidth = 2; ctx.stroke();
+    
     let pX, pY; const S = saturation / 100; const V = value / 100;
     if (pickerMode === 'triangle') {
         const tipX = center + shapeRadius;
@@ -231,20 +251,15 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
     }
     ctx.beginPath(); ctx.arc(pX, pY, 5, 0, 2 * Math.PI);
     ctx.strokeStyle = V > 0.5 ? 'black' : 'white'; ctx.lineWidth = 2; ctx.stroke(); ctx.fillStyle = `hsl(${hue}, ${saturation}%, ${value}%)`; ctx.fill();
-  }, [hue, saturation, value, pickerMode]);
+  }, [hue, saturation, value, pickerMode, dimensions]);
 
   const handleInteraction = (e) => {
-    // [性能优化] 极速节流：如果已有挂起的帧，直接返回，不读取任何事件属性
-    // 这对数位板（高回报率设备）至关重要，防止主线程被事件洪水淹没
     if (rAfRef.current) return;
-
-    // 仅在未节流时读取坐标
     const clientX = e.clientX;
     const clientY = e.clientY;
 
     rAfRef.current = requestAnimationFrame(() => {
-        rAfRef.current = null; // 重置锁
-
+        rAfRef.current = null; 
         const canvas = canvasRef.current;
         if (!canvas) return;
         const rect = canvas.getBoundingClientRect();
@@ -252,7 +267,6 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
         const x = (clientX - rect.left) * scaleX; const y = (clientY - rect.top) * scaleY;
         const dist = Math.sqrt((x - center)**2 + (y - center)**2);
         
-        // 注意：这里移除了对 e.buttons 的判断，因为在 rAF 中访问不到，且外层 pointermove 已隐含
         if (!isDraggingRing && !isDraggingShape && dist > size/2) return;
 
         if (!isDraggingShape && (isDraggingRing || (dist > innerRadius && dist < outerRadius + 5))) {
@@ -280,170 +294,166 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
     });
   };
   const stopDrag = () => { 
-      // [修复] 停止时取消挂起的动画帧，防止松手后的滞后帧重新激活拖拽状态
       if (rAfRef.current) { cancelAnimationFrame(rAfRef.current); rAfRef.current = null; }
       setIsDraggingRing(false); setIsDraggingShape(false); 
   };
 
-  return (
-    <div className="flex flex-col w-full select-none h-[210px] relative pt-1">
-        {/* 色轮区域 */}
-        <div className="flex items-start justify-center touch-none relative h-[200px] -mt-2">
-            {/* 问题2: 按钮放大 padding p-2 */}
-            <button onClick={onToggleMode} 
-                className={`absolute top-[8px] left-4 p-2 rounded-md border shadow-sm transition-all z-20
-                ${isDark 
-                    ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300 hover:border-slate-500/50' 
-                    : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600 hover:border-slate-500'}`} 
-                title={t("切换形状", "Toggle Shape")}
-            >
-                {pickerMode === 'triangle' ? <Triangle size={14} className="rotate-90 fill-current"/> : <Grid size={14} className="fill-current"/>}
-            </button>
+  // 1. 竖向混色槽 [修复: 拖拽逻辑]
+  const GroupMixingVertical = () => (
+      <div className="flex flex-col items-center gap-2 h-full py-1">
+         <div onClick={() => onSlotClick(1)} className={`w-[14px] h-[14px] shrink-0 rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 1 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0) }} />
+         
+         {/* 竖向混色条: 增加 window 监听以修复拖拽中断问题 */}
+         <div 
+            className="flex-1 w-[10px] rounded-full relative cursor-crosshair overflow-hidden border border-black/5 dark:border-white/10 group touch-none"
+            onPointerDown={(e) => {
+                e.preventDefault(); 
+                e.stopPropagation();
+                e.currentTarget.setPointerCapture(e.pointerId);
+                const rect = e.currentTarget.getBoundingClientRect();
+                
+                const updateColor = (clientY) => {
+                    const percent = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+                    const c1 = colorSlots[1] || {r:0,g:0,b:0}, c2 = colorSlots[2] || {r:255,g:255,b:255};
+                    const r = Math.round(c1.r + (c2.r - c1.r) * percent);
+                    const g = Math.round(c1.g + (c2.g - c1.g) * percent);
+                    const b = Math.round(c1.b + (c2.b - c1.b) * percent);
+                    onChange(rgbToHsv(r, g, b));
+                };
+                
+                updateColor(e.clientY); // 点击即生效
+                
+                const onMove = (ev) => { ev.preventDefault(); updateColor(ev.clientY); };
+                const onUp = (ev) => {
+                    if (onCommit) onCommit();
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                };
+                
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+            }}
+         >
+            <div className="absolute inset-0" style={{ background: `linear-gradient(to bottom, ${rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0)}, ${rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0)})` }} />
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 bg-white/10 transition-opacity" />
+         </div>
 
+         <div onClick={() => onSlotClick(2)} className={`w-[14px] h-[14px] shrink-0 rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 2 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0) }} />
+      </div>
+  );
+
+  // 2. 方槽 + 功能键 [修复: 支持对齐参数]
+  const GroupSquare = ({ align = 'end' }) => (
+     <div className={`flex flex-col gap-1.5 items-${align}`}>
+         <div className="flex flex-col gap-1">
+             <button 
+                className={`w-6 h-6 rounded border flex items-center justify-center shadow-sm transition-all
+                ${monitorPos ? 'bg-slate-500 border-slate-500 text-white' : (isPickingPixel ? 'bg-slate-500/20 border-slate-400 text-slate-400 animate-pulse' : (isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'))}`}
+                title={monitorPos ? t("停止监控", "Stop Monitor") : t("定点吸色", "Pick & Monitor")}
+                onClick={() => { if (monitorPos) setMonitorPos(null); else setIsPickingPixel(!isPickingPixel); }}
+             >
+                <Eye size={12} />
+             </button>
+             <button 
+                className={`w-6 h-6 rounded border flex items-center justify-center shadow-sm transition-all
+                ${isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'}`}
+                onClick={async (e) => {
+                    e.stopPropagation(); e.currentTarget.blur();
+                    try {
+                        const oldWin = await WebviewWindow.getByLabel('picker-overlay');
+                        if (oldWin) { await oldWin.close(); await new Promise(r => setTimeout(r, 200)); }
+                    } catch (e) {}
+                    window._isPicking = true;
+                    try {
+                        await invoke('capture_current_monitor_snapshot');
+                        new WebviewWindow('picker-overlay', {
+                            url: 'index.html?mode=picker',
+                            fullscreen: true, transparent: true, decorations: false, alwaysOnTop: true, skipTaskbar: true, resizable: false, focus: true, visible: false 
+                        });
+                    } catch (err) { window._isPicking = false; }
+                }}
+                title={t("屏幕吸管", "EyeDropper")}
+             >
+                <Pipette size={12} />
+             </button>
+         </div>
+
+         <div className="relative w-10 h-10">
+             <div 
+                onClick={() => onSlotClick(0)}
+                className={`absolute top-0 left-0 w-7 h-7 rounded-md shadow-md border transition-all cursor-pointer overflow-hidden group z-10
+                ${activeSlot === 0 ? 'border-white ring-1 ring-slate-400' : 'border-white/10 hover:scale-105'}`}
+                style={{ backgroundColor: rgbToHex(colorSlots[0].r, colorSlots[0].g, colorSlots[0].b) }}
+                title={t("当前颜色", "Current Color")}
+             >
+                 <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity"><Copy size={10} className="text-white drop-shadow-md"/></div>
+             </div>
+             <div 
+                onClick={() => { if (onUpdateCurrent) onUpdateCurrent(monitorRgb); }}
+                className={`absolute bottom-0 right-0 w-6 h-6 rounded-md border-2 border-white/80 shadow-lg cursor-pointer transition-transform hover:scale-110 z-20 flex items-center justify-center
+                ${monitorPos ? 'ring-1 ring-green-500' : 'grayscale opacity-50'}`}
+                style={{ backgroundColor: rgbToHex(monitorRgb.r, monitorRgb.g, monitorRgb.b) }}
+                title={monitorPos ? t("点击同步到当前", "Click to Sync") : t("未监控，使用定点吸色进行取色监控", "Idle")}
+             >
+                {!monitorPos && <div className="w-0.5 h-full bg-red-500/50 rotate-45 absolute"/>}
+             </div>
+         </div>
+     </div>
+  );
+
+  return (
+    <div 
+        className="w-full h-full flex items-stretch justify-between select-none relative pt-4 pb-4 px-[18px]" // [修复] 使用 px-[15px]
+        onDragStart={(e) => e.preventDefault()}
+    >
+        {/* 左侧栏：始终左对齐 */}
+        <div className="w-8 flex flex-col justify-between items-start z-30">
+            {/* 默认(非镜像): 混色条在左。镜像: 方槽在左 */}
+            {!leftHanded ? (
+                <GroupMixingVertical />
+            ) : (
+                <>
+                    <button onClick={onToggleMode} 
+                        className={`p-2 rounded-md border shadow-sm transition-all mb-2
+                        ${isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'}`} 
+                        title={t("切换形状", "Toggle Shape")}
+                    >
+                        {pickerMode === 'triangle' ? <Triangle size={14} className="rotate-90 fill-current"/> : <Grid size={14} className="fill-current"/>}
+                    </button>
+                    <GroupSquare align="start" />
+                </>
+            )}
+        </div>
+
+        {/* 中间自适应色环区 */}
+        <div ref={containerRef} className="flex-1 flex items-center justify-center relative touch-none min-w-0">
             <canvas 
                 ref={canvasRef} width={size} height={size} 
-                className="cursor-crosshair mt-1"
+                className="cursor-crosshair"
                 onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); handleInteraction(e); }}
                 onPointerMove={(e) => (isDraggingRing || isDraggingShape) && handleInteraction(e)}
                 onPointerUp={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); stopDrag(); if(onCommit) onCommit(); }}
-                // [修复] 监听指针捕获丢失事件(如拖出窗口松开)，作为 pointerUp 的兜底，防止拖拽状态卡死
                 onLostPointerCapture={(e) => { stopDrag(); if(onCommit) onCommit(); }}
             />
         </div>
-        
-        {/* 问题1: 布局重构 */}
-        <div className="flex items-end justify-between px-4 pb-2 h-[27px] -mt-6 relative z-30">
-             {/* 左侧：圆槽 + 混色条 (下沉) */}
-             {/* Fix 5: 增加 ring-1 ring-black/10 确保白色时可见 */}
-             <div className="flex items-center gap-2 pl-[8px] translate-y-0.5">
-                 <div onClick={() => onSlotClick(1)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 1 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0) }} />
-                 <div 
-                    className="w-[130px] h-[10px] rounded-full relative cursor-crosshair overflow-hidden border border-black/5 dark:border-white/10 group touch-none"
-                    onPointerDown={(e) => {
-                        e.currentTarget.setPointerCapture(e.pointerId);
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const updateColor = (clientX) => {
-                            const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-                            const c1 = colorSlots[1] || {r:0,g:0,b:0}, c2 = colorSlots[2] || {r:255,g:255,b:255};
-                            const r = Math.round(c1.r + (c2.r - c1.r) * percent);
-                            const g = Math.round(c1.g + (c2.g - c1.g) * percent);
-                            const b = Math.round(c1.b + (c2.b - c1.b) * percent);
-                            onChange(rgbToHsv(r, g, b));
-                        };
-                        
-                        // 立即触发一次，支持单击取色
-                        updateColor(e.clientX);
-                        
-                        const handleMove = (ev) => { ev.preventDefault(); updateColor(ev.clientX); };
-                        const handleUp = (ev) => {
-                            ev.currentTarget.removeEventListener('pointermove', handleMove);
-                            ev.currentTarget.removeEventListener('pointerup', handleUp);
-                            ev.currentTarget.releasePointerCapture(ev.pointerId);
-                            if(onCommit) onCommit();
-                        };
-                        
-                        e.currentTarget.addEventListener('pointermove', handleMove);
-                        e.currentTarget.addEventListener('pointerup', handleUp);
-                    }}
-                 >
-                    <div className="absolute inset-0" style={{ background: `linear-gradient(to right, ${rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0)}, ${rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0)})` }} />
-                    <div className="absolute inset-0 opacity-0 group-hover:opacity-100 bg-white/10 transition-opacity" />
-                 </div>
-                 <div onClick={() => onSlotClick(2)} className={`w-[14px] h-[10px] rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 2 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[2]?.r||0, colorSlots[2]?.g||0, colorSlots[2]?.b||0) }} />
-             </div>
 
-             {/* 右侧：方槽 + 上方功能键 */}
-             {/* 修改: items-center 改为 items-end 实现右对齐 */}
-             <div className="flex flex-col items-end gap-1.5 -mb-1">
-                 {/* 修改: 功能键改为竖排 flex-col */}
-                 <div className="flex flex-col gap-1">
-                     <button 
-                        className={`w-6 h-6 rounded border flex items-center justify-center shadow-sm transition-all
-                        ${monitorPos ? 'bg-slate-500 border-slate-500 text-white' : (isPickingPixel ? 'bg-slate-500/20 border-slate-400 text-slate-400 animate-pulse' : (isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'))}`}
-                        title={monitorPos ? t("停止监控", "Stop Monitor") : t("定点吸色", "Pick & Monitor")}
-                        onClick={() => { if (monitorPos) setMonitorPos(null); else setIsPickingPixel(!isPickingPixel); }}
-                     >
-                        <Eye size={12} />
-                     </button>
-                     <button 
-                        className={`w-6 h-6 rounded border flex items-center justify-center shadow-sm transition-all
-                        ${isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'}`}
-                        onClick={async (e) => {
-                            e.stopPropagation();
-                            e.currentTarget.blur();
-
-                            // [修复] 先尝试关闭旧窗口，并等待销毁完成，防止 Label 冲突
-                            try {
-                                const oldWin = await WebviewWindow.getByLabel('picker-overlay');
-                                if (oldWin) {
-                                    await oldWin.close();
-                                    // 关键修复：强制等待 200ms 让后台释放 Label，否则立即重建会失败
-                                    await new Promise(r => setTimeout(r, 200));
-                                }
-                            } catch (e) {}
-
-                            // [优化] 使用自定义高性能取色窗口，解决数位板卡顿问题
-                            // [修复] 移除死锁检查，允许强制重新触发防止卡死
-                            window._isPicking = true;
-                            
-                            // 先获取快照数据 (存入后端内存)
-                            try {
-                                await invoke('capture_current_monitor_snapshot');
-                                
-                                // 直接打开全屏窗口，位置和尺寸由窗口内部读取后端数据后决定
-                                new WebviewWindow('picker-overlay', {
-                                    url: 'index.html?mode=picker',
-                                    fullscreen: true, // 简单粗暴，直接全屏
-                                    transparent: true, decorations: false, alwaysOnTop: true, 
-                                    skipTaskbar: true, resizable: false, focus: true,
-                                    visible: false 
-                                });
-                            } catch (err) {
-                                console.error("Snapshot failed:", err);
-                                window._isPicking = false;
-                            }
-                        }}
-                        title={t("屏幕吸管", "EyeDropper")}
-                     >
-                        <Pipette size={12} />
-                     </button>
-                 </div>
-
-                 {/* [Issue 2] 重构：色槽重叠布局 (左上大 + 右下小) */}
-                     <div className="relative w-10 h-10 mb-0.5">
-                         
-                         {/* 1. 当前选色槽 (左上，略大) */}
-                     <div 
-                        // [Fix 3] 移除此处重复的定时器，减少 IPC 调用，缓解拖拽卡顿
-                        // 坐标同步已由 useTauriBackend 统一管理
-                        onClick={() => onSlotClick(0)}
-                        className={`absolute top-0 left-0 w-7 h-7 rounded-md shadow-md border transition-all cursor-pointer overflow-hidden group z-10
-                        ${activeSlot === 0 ? 'border-white ring-1 ring-slate-400' : 'border-white/10 hover:scale-105'}`}
-                        style={{ backgroundColor: rgbToHex(colorSlots[0].r, colorSlots[0].g, colorSlots[0].b) }}
-                        title={t("当前颜色", "Current Color")}
-                     >
-                         {/* 复制图标 */}
-                         <div className="absolute inset-0 flex items-center justify-center bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity">
-                             <Copy size={10} className="text-white drop-shadow-md"/>
-                         </div>
-                     </div>
-
-                     {/* 2. 监控色槽 (右下，略小，有描边，常驻) */}
-                     <div 
-                        onClick={() => {
-                            // 点击同步：将监控色 -> 当前色
-                            if (onUpdateCurrent) onUpdateCurrent(monitorRgb);
-                        }}
-                        className={`absolute bottom-0 right-0 w-6 h-6 rounded-md border-2 border-white/80 shadow-lg cursor-pointer transition-transform hover:scale-110 z-20 flex items-center justify-center
-                        ${monitorPos ? 'ring-1 ring-green-500' : 'grayscale opacity-50'}`}
-                        style={{ backgroundColor: rgbToHex(monitorRgb.r, monitorRgb.g, monitorRgb.b) }}
-                        title={monitorPos ? t("点击同步到当前", "Click to Sync") : t("未监控，使用定点吸色进行取色监控", "Idle")}
-                     >
-                        {!monitorPos && <div className="w-0.5 h-full bg-red-500/50 rotate-45 absolute"/>}
-                     </div>
-
-                 </div>
-             </div>
+        {/* 右侧栏：始终右对齐 */}
+        <div className="w-9 flex flex-col justify-between items-end z-30">
+            {/* 默认(非镜像): 方槽在右。镜像: 混色条在右 */}
+            {!leftHanded ? (
+                 <>
+                    <button onClick={onToggleMode} 
+                        className={`p-2 rounded-md border shadow-sm transition-all mb-2
+                        ${isDark ? 'bg-[#2a2a2a] border-white/10 text-gray-400 hover:text-slate-300' : 'bg-white border-gray-200 text-gray-500 hover:text-slate-600'}`} 
+                        title={t("切换形状", "Toggle Shape")}
+                    >
+                        {pickerMode === 'triangle' ? <Triangle size={14} className="rotate-90 fill-current"/> : <Grid size={14} className="fill-current"/>}
+                    </button>
+                    <GroupSquare align="end" />
+                </>
+            ) : (
+                <GroupMixingVertical />
+            )}
         </div>
     </div>
   );

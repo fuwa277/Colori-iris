@@ -688,8 +688,9 @@ export const SelectorWindow = () => {
         const logicalRect = {
             x: Math.round(physicalRect.x / dpr),
             y: Math.round(physicalRect.y / dpr),
-            w: Math.round(physicalRect.w / dpr),
-            h: Math.round(physicalRect.h / dpr)
+            // [修复] 使用 ceil 向上取整，防止窗口比图片小 1px 导致显示不全
+            w: Math.ceil(physicalRect.w / dpr),
+            h: Math.ceil(physicalRect.h / dpr)
         };
 
         await appWindow.hide();
@@ -880,26 +881,43 @@ export const ReferenceWindow = () => {
         }
     };
 
-    // [新增] 状态汇报逻辑 (用于记忆功能)
+    // [修复 2] 状态汇报逻辑 (增加 onMoved 和 onResized 监听)
     useEffect(() => {
-        // 防抖汇报
-        const timer = setTimeout(async () => {
-            if (imgSrc && !imgSrc.startsWith('http')) { // 仅记忆本地/临时文件
+        // 封装汇报函数
+        const reportState = async () => {
+            if (imgSrc && !imgSrc.startsWith('http')) {
                 try {
                     const pos = await appWindow.outerPosition();
                     const size = await appWindow.innerSize();
+                    const dpr = window.devicePixelRatio || 1;
+                    
                     emit('ref-report-state', {
                         label: appWindow.label,
-                        // [Fix] 优先保存原始文件路径。如果只存了 imgSrc (Base64)，会导致重启时 URL 过长崩溃
-                        path: originalPath || (imgSrc.startsWith('http') ? imgSrc : null), 
-                        x: pos.x, y: pos.y, w: size.width, h: size.height,
+                        path: originalPath || (imgSrc.startsWith('http') ? imgSrc : null),
+                        // 统一转换为逻辑坐标保存
+                        x: Math.round(pos.x / dpr),
+                        y: Math.round(pos.y / dpr),
+                        w: Math.round(size.width / dpr),
+                        h: Math.round(size.height / dpr),
                         opacity, isGray, isTopmost, ignoreMouse, view
                     });
                 } catch(e) {}
             }
-        }, 500);
-        return () => clearTimeout(timer);
-    }, [imgSrc, opacity, isGray, isTopmost, ignoreMouse, view]);
+        };
+
+        // 1. 基础状态变化时汇报 (防抖)
+        const timer = setTimeout(reportState, 500);
+
+        // 2. [新增] 监听窗口移动和大小改变
+        const unlistenMove = appWindow.onMoved(reportState);
+        const unlistenResize = appWindow.onResized(reportState);
+
+        return () => {
+            clearTimeout(timer);
+            unlistenMove.then(f => f());
+            unlistenResize.then(f => f());
+        };
+    }, [imgSrc, opacity, isGray, isTopmost, ignoreMouse, view]); // 依赖项不变
 
     // 窗口关闭时发送销毁事件
     useEffect(() => {
