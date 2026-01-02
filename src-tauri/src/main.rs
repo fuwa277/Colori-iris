@@ -487,6 +487,11 @@ fn diagnose_window(name: String) -> String {
 }
 
 #[tauri::command]
+fn run_sync_macro(app: tauri::AppHandle) {
+    perform_color_sync_macro(&app);
+}
+
+#[tauri::command]
 fn log_to_file(msg: String) {
     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
     let log_msg = format!("[{}] {}", timestamp, msg);
@@ -1919,7 +1924,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
         load_config_file,  // 本地读取
         capture_current_monitor_snapshot, // [修改]
         fetch_pending_snapshot, // [新增]
-        move_window_to_cursor_monitor // [新增] 自动定位
+        move_window_to_cursor_monitor, // [新增] 自动定位
+        run_sync_macro
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

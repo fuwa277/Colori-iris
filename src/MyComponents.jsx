@@ -583,7 +583,7 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, value, onP
         ctx.setLineDash([]);
     }
     drawMarker(ctx, w, h);
-  }, [effectiveTargetLuminance, crosshair, drawMarker, alg, useGamma]);
+  }, [effectiveTargetLuminance, crosshair, drawMarker, alg, useGamma, dims]); // [修复] 补全 dims 依赖
 
   useEffect(() => { draw(); }, [draw]);
 

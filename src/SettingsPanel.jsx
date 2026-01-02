@@ -225,6 +225,18 @@ export const SettingsPanel = ({
                         </div>
                     </div>
                 </div>
+
+                {/* [新增] 面板隐藏联动吸色 */}
+                <div className="flex justify-end items-center gap-2 -mt-1 pr-11">
+                    <span className="text-[9px] opacity-40">{t('隐藏时自动吸色', 'Sync on Hide')}</span>
+                    <input 
+                        type="checkbox" 
+                        checked={settings.syncOnToggle || false}
+                        onChange={(e) => setSettings({...settings, syncOnToggle: e.target.checked})}
+                        title={t("通过快捷键隐藏面板时，会自动向目标软件发送一次吸色指令 (需配合下方应用同步设置)", "Trigger color sync macro automatically when hiding panel via hotkey.")}
+                        className="w-3 h-3 rounded border-gray-500/30 accent-slate-500 cursor-pointer"
+                    />
+                </div>
                 
                 <div className={`mt-2 pt-2 border-t border-gray-500/10 space-y-3`}>
                     {/* [优化] 增加管理员权限提示 & 输入法警告 */}

@@ -37,6 +37,9 @@ try {
 export default function App() {
   const { colorBlockRef } = useTauriBackend();
 
+  // [新增] 使用 Ref 同步最新设置，解决监听器闭包过时问题
+  const settingsRef = useRef(null);
+
   // --- 基础 Hooks 和 状态 ---
   // 主窗口关闭事件监听 & 阻止默认拖拽
   useEffect(() => {
@@ -271,7 +274,8 @@ const openSelectorWindow = async (label, url) => {
       hotkeySyncKey: 'Shift+F12', // 默认触发键
       hotkeySyncPickKey: 'Shift+I', // 默认取色键
       useGamma: true, // 默认开启 Gamma
-      aiFilter: true, feedTags: '高级感', topmost: false, grayMode: 'custom'
+      aiFilter: true, feedTags: '高级感', topmost: false, grayMode: 'custom',
+      syncOnToggle: false
   }));
   const [runningApps, setRunningApps] = useState([]); 
   const [monitorPos, setMonitorPos] = useState(null); 
@@ -458,6 +462,8 @@ const openSelectorWindow = async (label, url) => {
   useEffect(() => {
       const updatedSettings = { ...settings, iccProfile };
       localStorage.setItem('colori_settings', JSON.stringify(updatedSettings));
+      // 同步 Ref
+      settingsRef.current = updatedSettings;
       emit('settings-changed', updatedSettings);
   }, [settings, iccProfile]);
 
@@ -498,11 +504,18 @@ const openSelectorWindow = async (label, url) => {
   // 监听后端发来的全局热键事件 & 托盘解绑信号 & 宏调试事件
   useEffect(() => {
       // 1. 统一的面板显隐/定位控制逻辑 (区分 快捷键/托盘 触发方式)
-      const toggleMainWindow = async (followMouse = true) => {
+      const toggleMainWindow = async (followMouse = true, forceShow = false) => {
           const isMinimized = await appWindow.isMinimized();
           const visible = await appWindow.isVisible();
           
-          if (visible && !isMinimized) {
+          // 从 Ref 读取最新设置，确保逻辑实时性
+          const currentSettings = settingsRef.current || settings;
+          
+          if (!forceShow && visible && !isMinimized) {
+              // [新增] 如果通过快捷键最小化，且开启了联动吸色
+              if (followMouse && currentSettings.syncOnToggle) {
+                  invoke('run_sync_macro');
+              }
               await appWindow.minimize();
           } else {
               try {
@@ -546,7 +559,8 @@ const openSelectorWindow = async (label, url) => {
 
       // [新增] 监听托盘信号，实现 WakePip 解绑 (托盘触发时不跟随鼠标)
       const unlistenTray = listen('tray-show-main', () => {
-          toggleMainWindow(false);
+          // [修复] 托盘触发固定为 forceShow: true，防止双击导致一开一关
+          toggleMainWindow(false, true);
       });
 
       const unlistenHotkeys = listen('global-hotkey', async (e) => {
