@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTauriBackend } from './hooks/useTauriBackend';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, PhysicalPosition } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit, listen } from '@tauri-apps/api/event';
 import { Palette, Sun, Moon, Minimize2, X, Pin, Eye, Layers, Pipette, Monitor, Image as ImageIcon, Sliders, RefreshCw } from 'lucide-react';
@@ -172,26 +172,19 @@ const openSelectorWindow = async (label, url) => {
       });
 
       const unlistenDrop = listen('tauri://file-drop', (event) => {
-          console.log('[Probe] Drop Event:', event);
-          
           if (event.payload && event.payload.length > 0) {
-              console.log('[Probe] File Paths:', event.payload);
               const filePath = event.payload[0];
               const label = `ref-file-${Date.now()}`;
-              localStorage.setItem('ref-temp-path', filePath); 
-              // 尝试创建窗口
+              // [同步103] 通过路径传参解决 LocalStorage 竞态导致的加载失败
               try {
-                  const win = new WebviewWindow(label, {
-                      url: 'index.html',
+                  new WebviewWindow(label, {
+                      url: `index.html?path=${encodeURIComponent(filePath)}`,
                       width: 300, height: 300,
                       decorations: false, transparent: true, alwaysOnTop: true
                   });
-                  console.log('[Probe] Window creating:', label);
               } catch (e) {
-                  console.error('[Probe] Window creation failed:', e);
+                  console.error('Window creation failed:', e);
               }
-          } else {
-              console.warn('[Probe] Drop payload is empty!');
           }
       });
 
@@ -268,8 +261,10 @@ const openSelectorWindow = async (label, url) => {
       hotkeyMonitor: 'Alt+F2',  // 修改默认
       hotkeyRegion: '',         // 新增
       hotkeyRef: '',            // 新增
+      hotkeyShowHide: 'F8',     // [同步103] 默认显隐热键
       globalRegion: true,       // 默认开启全局
       globalRef: true,          // 默认开启全局
+      globalShowHide: true,     // [同步103]
       leftHanded: false,        // [需求1] 左手模式 (镜像布局)
       hotkeySyncEnabled: false, 
       hotkeySyncApp: '', 
@@ -479,6 +474,7 @@ const openSelectorWindow = async (label, url) => {
       if (settings.globalMonitor) flags |= 4;
       if (settings.globalRegion ?? true) flags |= 8;
       if (settings.globalRef ?? true) flags |= 16;
+      if (settings.globalShowHide ?? true) flags |= 32;
       
       console.log("[App] Updating Global Hotkeys:", {
           gray: settings.hotkeyGray, 
@@ -486,67 +482,91 @@ const openSelectorWindow = async (label, url) => {
           moni: settings.hotkeyMonitor, 
           region: settings.hotkeyRegion,
           ref: settings.hotkeyRef,
+          show: settings.hotkeyShowHide,
           flags
       });
 
       invoke('update_extra_hotkeys', { 
           gray: settings.hotkeyGray||"", pick: settings.hotkeyPick||"", moni: settings.hotkeyMonitor||"", 
           region: settings.hotkeyRegion||"", refKey: settings.hotkeyRef||"",
+          show: settings.hotkeyShowHide||"",
           flags 
       }).catch(err => console.error("Failed to update hotkeys", err));
       
   }, [settings]); // 依赖保持 settings
 
-  // 监听后端发来的全局热键事件 & 宏调试事件
+  // 监听后端发来的全局热键事件 & 托盘解绑信号 & 宏调试事件
   useEffect(() => {
-      // 监听宏步进
+      // 1. 统一的面板显隐/定位控制逻辑 (区分 快捷键/托盘 触发方式)
+      const toggleMainWindow = async (followMouse = true) => {
+          const isMinimized = await appWindow.isMinimized();
+          const visible = await appWindow.isVisible();
+          
+          if (visible && !isMinimized) {
+              await appWindow.minimize();
+          } else {
+              try {
+                  await appWindow.unminimize();
+                  
+                  // 只有当 followMouse 为 true 时（快捷键触发），才重新定位到鼠标位置
+                  if (followMouse) {
+                      const pos = await invoke('get_mouse_pos'); 
+                      // 定位算法：X轴偏移140，Y轴偏移220，让面板中心精准对齐鼠标
+                      await appWindow.setPosition(new PhysicalPosition(pos[0] - 140, pos[1] - 220));
+                  }
+                  
+                  await appWindow.show();
+                  await appWindow.setFocus();
+              } catch (err) {
+                  // 兜底方案：直接显示
+                  await appWindow.unminimize();
+                  await appWindow.show();
+                  await appWindow.setFocus();
+              }
+          }
+      };
+
       const unlistenMacro = listen('macro-debug-step', (e) => {
           if (e.payload === 'DONE') setMacroStep(null);
           else setMacroStep(e.payload);
       });
 
-      // [新增] 监听自定义取色器的返回结果
       const unlistenPicker = listen('picker-color-selected', (e) => {
           const hex = e.payload;
           const c = hexToRgb(hex);
           if (c) {
-              // 模拟 EyeDropper 返回，更新颜色并释放锁
               setColorSlots(prev => {
                   const next = [...prev]; next[activeSlot] = c; if(activeSlot!==0) next[0]=c; return next;
               });
           }
           window._isPicking = false;
       });
-      // 监听取色器关闭事件 (释放锁)
+
       const unlistenPickerClose = listen('picker-closed', () => { window._isPicking = false; });
 
-      const unlisten = listen('global-hotkey', async (e) => {
+      // [新增] 监听托盘信号，实现 WakePip 解绑 (托盘触发时不跟随鼠标)
+      const unlistenTray = listen('tray-show-main', () => {
+          toggleMainWindow(false);
+      });
+
+      const unlistenHotkeys = listen('global-hotkey', async (e) => {
           if (e.payload === 'gray') {
-              // [修复] 更新时间锁，防止轮询器在系统响应前覆盖状态
               lastGrayToggleRef.current = Date.now();
-              
               if (settings.grayMode === 'system') {
                   invoke('trigger_system_grayscale');
                   setIsGrayscale(p => !p);
               } else setIsGrayscale(p => !p);
           }
           if (e.payload === 'pick') {
-              // [优化] 移除主窗口强制置顶，防止遮挡绘画软件
-              
-              // [修改] 全局快捷键同样触发新的高性能取色器
               if (!window._isPicking) {
                   window._isPicking = true;
                   try {
-                      // 1. 后端截屏并存入内存 (极速)
                       await invoke('capture_current_monitor_snapshot');
-                      
-                      // 2. 直接打开窗口，尺寸将在窗口内部自适应调整
-                      // 注意：这里初始宽高设为全屏或稍大即可，ScreenPickerWindow 会自适应
                       new WebviewWindow('picker-overlay', {
                           url: 'index.html?mode=picker',
                           transparent: true, decorations: false, alwaysOnTop: true, 
                           skipTaskbar: true, resizable: false, focus: true, visible: false,
-                          fullscreen: true // 强制全屏以覆盖
+                          fullscreen: true 
                       });
                   } catch(err) { 
                       console.error(err);
@@ -555,11 +575,9 @@ const openSelectorWindow = async (label, url) => {
               }
           }
           if (e.payload === 'monitor') {
-              // [优化] 仅开启吸色状态，不抢占焦点
               setIsPickingPixel(true);
           }
           if (e.payload === 'region') {
-              // [修复] 使用动态 Label 防止冲突
               new WebviewWindow(`selector-monitor-${Date.now()}`, {
                   url: 'index.html?mode=monitor',
                   transparent: true, fullscreen: true, alwaysOnTop: true, 
@@ -568,7 +586,6 @@ const openSelectorWindow = async (label, url) => {
               });
           }
           if (e.payload === 'ref') {
-              // [修复] 使用动态 Label 防止冲突
               new WebviewWindow(`selector-shot-${Date.now()}`, {
                   url: 'index.html?mode=screenshot',
                   transparent: true, fullscreen: true, alwaysOnTop: true, 
@@ -576,11 +593,18 @@ const openSelectorWindow = async (label, url) => {
                   visible: false
               });
           }
+          if (e.payload === 'show_hide') {
+              // 快捷键触发时，明确传递 true 使其跟随鼠标
+              toggleMainWindow(true);
+          }
       });
+
       return () => { 
-          unlisten.then(f=>f()); 
+          unlistenMacro.then(f=>f()); 
           unlistenPicker.then(f=>f());
           unlistenPickerClose.then(f=>f());
+          unlistenTray.then(f=>f());
+          unlistenHotkeys.then(f=>f());
       };
   }, [settings.grayMode, activeSlot]);
 

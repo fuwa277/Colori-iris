@@ -10,6 +10,8 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse, remembe
     // 错误提示状态管理
     const [errorMsg, setErrorMsg] = useState(null);
     const timerRef = useRef(null);
+    // 拖拽状态
+    const [isDragging, setIsDragging] = useState(false);
 
     const showError = (msg) => {
         if (timerRef.current) clearTimeout(timerRef.current);
@@ -125,9 +127,35 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse, remembe
                 </button>
             </div>
 
-            {/* Fix 1: 改为点击上传 (Input File) */}
+            {/* Fix 1: 点击上传 + HTML5 拖拽支持 */}
             <div 
-                className={`h-24 rounded-xl border-2 border-dashed flex flex-col items-center justify-center transition-colors cursor-pointer ${isDark ? 'border-white/10 hover:border-slate-500/50 hover:bg-white/5' : 'border-black/10 hover:border-slate-500/50 hover:bg-black/5'}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={async (e) => {
+                    e.preventDefault();
+                    setIsDragging(false);
+                    const file = e.dataTransfer.files[0];
+                    if (file && file.type.startsWith('image/')) {
+                        const reader = new FileReader();
+                        reader.onload = async (ev) => {
+                            const dataUrl = ev.target.result;
+                            const filePath = await invoke('save_temp_image', { dataUrl });
+                            const img = new Image();
+                            img.onload = () => {
+                                const ratio = img.height / img.width;
+                                const winW = 300; const winH = Math.round(winW * ratio);
+                                new WebviewWindow(`ref-file-${Date.now()}`, {
+                                    url: `index.html?path=${encodeURIComponent(filePath)}`, 
+                                    width: winW, height: winH,
+                                    decorations: false, transparent: true, alwaysOnTop: true, skipTaskbar: false
+                                });
+                            };
+                            img.src = dataUrl;
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                }}
+                className={`h-24 rounded-xl border-2 border-dashed flex flex-col items-center justify-center transition-all cursor-pointer relative overflow-hidden ${isDragging ? 'border-teal-500 bg-teal-500/10 scale-[1.02]' : (isDark ? 'border-white/10 hover:border-slate-500/50 hover:bg-white/5' : 'border-black/10 hover:border-slate-500/50 hover:bg-black/5')}`}
                 onClick={() => document.getElementById('ref-upload-input').click()}
             >
                 <input 
@@ -141,15 +169,11 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse, remembe
                             const reader = new FileReader();
                             reader.onload = async (ev) => {
                                 const dataUrl = ev.target.result;
-                                // Fix 8: 写入临时文件，防止 LocalStorage 溢出
                                 const filePath = await invoke('save_temp_image', { dataUrl });
-                                
                                 const img = new Image();
                                 img.onload = () => {
                                     const ratio = img.height / img.width;
                                     const winW = 300; const winH = Math.round(winW * ratio);
-                                    
-                                    // [修复 Issue 1] 通过 URL 传递路径
                                     new WebviewWindow(`ref-file-${Date.now()}`, {
                                         url: `index.html?path=${encodeURIComponent(filePath)}`, 
                                         width: winW, height: winH,
@@ -160,12 +184,15 @@ export const RefPanel = ({ isDark, t, refIgnoreMouse, setRefIgnoreMouse, remembe
                             };
                             reader.readAsDataURL(file);
                         }
-                        // 重置 input 防止重复选择同一文件不触发
                         e.target.value = '';
                     }}
                 />
-                <div className="opacity-50"><ImageIcon size={24}/></div>
-                <span className="text-[10px] mt-2 opacity-50">{t('点击上传图片新建参考', 'Click to Upload Ref')}</span>
+                <div className={`transition-transform duration-300 ${isDragging ? 'scale-125 text-teal-500' : 'opacity-50'}`}>
+                    <ImageIcon size={24}/>
+                </div>
+                <span className={`text-[10px] mt-2 transition-opacity ${isDragging ? 'text-teal-500 font-bold' : 'opacity-50'}`}>
+                    {isDragging ? t('松开以导入', 'Drop to Import') : t('点击或拖拽图片新建参考', 'Click or Drag Image')}
+                </span>
             </div>
             <div className="text-[10px] opacity-40 text-center mt-2 px-4 space-y-1">
                 <div>{t('提示: 开启穿透后，参考图将无法响应鼠标，请在此处关闭穿透以移动或缩放图片', 'Note: When Ignore Mouse is ON, use this switch to regain control.')}</div>

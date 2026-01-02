@@ -348,9 +348,9 @@ export const MonitorWindow = () => {
         // 立即执行一次样式修复
         setTimeout(() => invoke('ensure_window_clickable', { label: appWindow.label }), 500);
 
-        // [调试] 全局点击检测
-        const debugHandler = (e) => console.log(`[MonitorWindow] Global Click Detected. Target: <${e.target.tagName.toLowerCase()} class="${e.target.className}">`);
-        window.addEventListener('mousedown', debugHandler);
+        // [调试] 全局点击检测 - [修复] 升级为 pointerdown 以捕获数位笔
+        const debugHandler = (e) => console.log(`[MonitorWindow] Global Pointer: type=${e.pointerType} target=<${e.target.tagName.toLowerCase()}>`);
+        window.addEventListener('pointerdown', debugHandler);
 
         return () => {
             // [稳定性优化] 确保清理函数正确执行，防止内存泄漏
@@ -359,7 +359,7 @@ export const MonitorWindow = () => {
             unlistenWake.then(f => f && f());
             unlistenGraySync.then(f => f && f());
             clearInterval(minCheckTimer);
-            window.removeEventListener('mousedown', debugHandler);
+            window.removeEventListener('pointerdown', debugHandler);
         };
     }, []);
 
@@ -485,13 +485,27 @@ export const MonitorWindow = () => {
             className="w-full h-full relative group border border-white/10 rounded-lg transition-all duration-300 flex flex-col"
             style={{ backgroundColor: 'rgba(0,0,0,0.01)' }} // 保持微量透明度以接收点击
         >
-            {/* [终极修复] 专用拖拽层：fixed + z-10。使用 fixed 确保绝对填满窗口，防止 absolute 因父级布局塌陷导致失效 */}
+            {/* [终极修复] 专用拖拽层：touchAction禁止手势 + 0.02透明度防止穿透 */ }
             <div 
                 className="fixed inset-0 z-10 cursor-move"
-                style={{ backgroundColor: 'rgba(255,255,255,0.01)' }}
-                onMouseDown={(e) => {
+                style={{ 
+                    backgroundColor: 'rgba(255,255,255,0.02)', 
+                    touchAction: 'none' // 依靠 CSS 禁止滚动，不要在 JS 里 preventDefault
+                }}
+                onPointerDown={(e) => {
+                    // 右键穿透
+                    if (e.button === 2) return;
+
+                    // 左键 或 笔尖接触 (button 0)
                     if (e.button === 0) {
-                        e.preventDefault(); 
+                        e.stopPropagation();
+                        // 必须释放 DOM 的指针捕获，让 Tauri/OS 接管输入流
+                        try {
+                            if (e.target.hasPointerCapture(e.pointerId)) {
+                                e.target.releasePointerCapture(e.pointerId);
+                            }
+                        } catch (err) {}
+
                         appWindow.startDragging().catch(console.error);
                     }
                 }}
@@ -512,17 +526,17 @@ export const MonitorWindow = () => {
                 </div>
             )}
 
-            {/* Resize 把手 - [回退] 兼容旧版 Tauri API (startResizing) */}
-            <div className="resize-handle absolute top-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent"
-                 onMouseDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(1); }} />
-            <div className="resize-handle absolute bottom-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent"
-                 onMouseDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(2); }} />
-            <div className="resize-handle absolute top-0 left-0 w-4 h-full cursor-ew-resize z-50 bg-transparent"
-                 onMouseDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(3); }} />
-            <div className="resize-handle absolute top-0 right-0 w-4 h-full cursor-ew-resize z-50 bg-transparent"
-                 onMouseDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(4); }} />
-            <div className="resize-handle absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-[51] bg-white/10 hover:bg-teal-500 rounded-tl clip-triangle transition-colors"
-                 onMouseDown={(e) => { e.stopPropagation(); appWindow.startResizing(); }} />
+            {/* Resize 把手 - [修复] 升级为 onPointerDown 以支持数位笔 */}
+            <div className="resize-handle absolute top-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent touch-none"
+                 onPointerDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(1); }} />
+            <div className="resize-handle absolute bottom-0 left-0 w-full h-4 cursor-ns-resize z-50 bg-transparent touch-none"
+                 onPointerDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(2); }} />
+            <div className="resize-handle absolute top-0 left-0 w-4 h-full cursor-ew-resize z-50 bg-transparent touch-none"
+                 onPointerDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(3); }} />
+            <div className="resize-handle absolute top-0 right-0 w-4 h-full cursor-ew-resize z-50 bg-transparent touch-none"
+                 onPointerDown={(e)=>{ e.stopPropagation(); appWindow.startResizing(4); }} />
+            <div className="resize-handle absolute bottom-0 right-0 w-6 h-6 cursor-nwse-resize z-[51] bg-white/10 hover:bg-teal-500 rounded-tl clip-triangle transition-colors touch-none"
+                 onPointerDown={(e) => { e.stopPropagation(); appWindow.startResizing(); }} />
 
             {/* 状态提示层 */}
             {(isSourceMinimized || wgcError) && (
@@ -608,29 +622,25 @@ export const SelectorWindow = () => {
     const [mode, setMode] = useState('idle'); 
     const [dragOffset, setDragOffset] = useState({x:0, y:0});
     const [monitorScale, setMonitorScale] = useState(1); 
-    const [isReady, setIsReady] = useState(false); // [安全] 防止未定位完成时操作
+    const [isReady, setIsReady] = useState(false); 
+    
+    // [修复] 用于手动检测双击的时间戳 Ref
+    const lastClickRef = useRef(0);
 
     useEffect(() => {
-        // [修复] 初始化时，强制将窗口移动到鼠标所在的显示器
         const initWindow = async () => {
             try {
-                // 1. 移动窗口并铺满该屏幕 (后端已同时设置了 Size，无需 setFullscreen)
-                // 这解决了 setFullscreen 在副屏可能导致的错位问题
                 const scale = await invoke('move_window_to_cursor_monitor', { label: appWindow.label });
                 setMonitorScale(scale);
-                
-                // 2. 置顶
                 await invoke('set_window_topmost', { label: appWindow.label, topmost: true });
-                
-                // 3. 直接显示 (延时极短以确保位置已更新)
                 setTimeout(async () => {
                     await appWindow.show();
                     await appWindow.setFocus();
-                    setIsReady(true); // [安全] 标记为就绪
-                }, 50); //稍微增加一点延时确保窗口移动完成
+                    setIsReady(true);
+                }, 50); 
             } catch (e) { 
                 console.error("Win Init Failed:", e); 
-                appWindow.close(); // 失败则关闭，防止残留不可见窗口
+                appWindow.close();
             }
         };
         initWindow();
@@ -641,7 +651,7 @@ export const SelectorWindow = () => {
         };
         window.addEventListener('keydown', handleKey);
         return () => window.removeEventListener('keydown', handleKey);
-    }, [startPos, endPos]); // 注意：这里保留依赖是为了闭包，但 init 只执行一次(useEffect挂载)
+    }, [startPos, endPos]);
 
     const getRect = () => {
         if (!startPos || !endPos) return null;
@@ -657,38 +667,24 @@ export const SelectorWindow = () => {
         const rect = getRect();
         if (!rect || rect.w < 5 || rect.h < 5) return;
         
-        // [修复多屏坐标] 获取窗口的全局物理位置，加上鼠标相对位移
-        // [关键修复] 使用后端返回的 monitorScale 而不是前端的 dpr
         const dpr = monitorScale; 
-        // [修复错位] 使用 innerPosition 确保获取的是网页内容区的绝对物理坐标，排除系统隐形边框干扰
         const winPos = await appWindow.innerPosition(); 
         
-        // [修复] 增加坐标安全取整，防止浮点数导致的 1px 缝隙
-        // 注意：目前后端机制限制，不支持跨屏截取。物理坐标是基于当前所在显示器的。
-        
-        // 1. 先计算相对于窗口的物理像素尺寸 (Logic -> Physical)
         const physW = Math.floor(rect.w * dpr);
         const physH = Math.floor(rect.h * dpr);
-        
-        // 2. 计算相对于窗口的物理偏移
         const physOffsetX = Math.floor(rect.x * dpr);
         const physOffsetY = Math.floor(rect.y * dpr);
 
         const physicalRect = {
-            // 3. 加上窗口本身的物理基准坐标
-            // 使用 Math.max(0, ...) 是一种防御性编程，防止某些边缘情况出现负数导致后端判断屏幕错误
             x: Math.round(winPos.x + physOffsetX), 
             y: Math.round(winPos.y + physOffsetY),
             w: physW,
             h: physH
         };
 
-        // [Fix] 额外计算一份逻辑坐标，专门用于前端窗口定位，解决高DPI下窗口跑偏问题
-        // dpr (monitorScale) 是当前屏幕的缩放比例
         const logicalRect = {
             x: Math.round(physicalRect.x / dpr),
             y: Math.round(physicalRect.y / dpr),
-            // [修复] 使用 ceil 向上取整，防止窗口比图片小 1px 导致显示不全
             w: Math.ceil(physicalRect.w / dpr),
             h: Math.ceil(physicalRect.h / dpr)
         };
@@ -697,7 +693,7 @@ export const SelectorWindow = () => {
         setTimeout(async () => {
             await emit('region-selected', { 
                 ...physicalRect, 
-                logical: logicalRect, // 将逻辑坐标一同发送
+                logical: logicalRect,
                 purpose: window.location.search.includes('mode=monitor') ? 'monitor' : 'screenshot' 
             });
             appWindow.close();
@@ -709,16 +705,20 @@ export const SelectorWindow = () => {
         else appWindow.close();
     };
 
-    const handleMouseDown = (e) => {
-        if (!isReady) return; // [安全] 未就绪不响应
+    // [修复] 升级为 Pointer Events
+    const handlePointerDown = (e) => {
+        if (!isReady) return; 
         
-        // 关键：阻止默认行为，防止点击穿透到桌面
+        // 锁定指针，确保在窗口外移动也能捕获
+        e.currentTarget.setPointerCapture(e.pointerId);
         e.preventDefault(); 
         e.stopPropagation();
         
-        if (e.button === 2) return; // 右键仅在松开时处理
+        // 右键
+        if (e.button === 2) return; 
 
-        if (e.button === 0) { 
+        // 左键 或 压感笔
+        if (e.button === 0 || e.pointerType === 'pen' || e.pointerType === 'touch') { 
             const rect = getRect();
             const mx = e.clientX, my = e.clientY;
             if (rect && mx >= rect.x && mx <= rect.x + rect.w && my >= rect.y && my <= rect.y + rect.h) {
@@ -732,10 +732,12 @@ export const SelectorWindow = () => {
         }
     };
 
-    const handleMouseMove = (e) => {
+    const handlePointerMove = (e) => {
         if (mode === 'selecting') {
+            e.preventDefault();
             setEndPos({ x: e.clientX, y: e.clientY });
         } else if (mode === 'moving' && startPos && endPos) {
+            e.preventDefault();
             const rect = getRect();
             const w = rect.w; const h = rect.h;
             const newX = e.clientX - dragOffset.x;
@@ -745,11 +747,19 @@ export const SelectorWindow = () => {
         }
     };
 
-    const handleMouseUp = (e) => {
+    const handlePointerUp = (e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
         e.preventDefault(); e.stopPropagation();
         setMode('idle');
+
+        // [修复] 手动检测双击逻辑 (Pointer Events 下 preventDefault 会屏蔽原生 dblclick)
+        const now = Date.now();
+        if (now - lastClickRef.current < 300) { // 300ms 间隔内视为双击
+            handleConfirm();
+        }
+        lastClickRef.current = now;
+
         if (e.button === 2) {
-            // 右键松开时关闭，此时事件已被当前窗口捕获，不会传到底层
             cancelSelection();
         }
     };
@@ -757,10 +767,11 @@ export const SelectorWindow = () => {
     const rect = getRect();
 
     return (
-        <div className="w-screen h-screen cursor-crosshair bg-transparent focus:outline-none"
-            onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp}
-            onDoubleClick={handleConfirm} 
-            onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }} // 彻底禁用右键菜单
+        <div className="w-screen h-screen cursor-crosshair bg-transparent focus:outline-none touch-none"
+            onPointerDown={handlePointerDown} 
+            onPointerMove={handlePointerMove} 
+            onPointerUp={handlePointerUp}
+            onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }}
         >
             <div className="absolute inset-0 bg-black/30" style={rect ? { clipPath: `polygon(0% 0%, 0% 100%, 100% 100%, 100% 0%, 0% 0%, ${rect.x}px ${rect.y}px, ${rect.x + rect.w}px ${rect.y}px, ${rect.x + rect.w}px ${rect.y + rect.h}px, ${rect.x}px ${rect.y + rect.h}px, ${rect.x}px ${rect.y}px)` } : {}} />
             {rect && (
@@ -778,7 +789,7 @@ export const SelectorWindow = () => {
             )}
             {!startPos && (
                 <div className="absolute top-20 left-1/2 -translate-x-1/2 text-white/90 bg-black/60 px-6 py-3 rounded-xl text-sm backdrop-blur border border-white/10 select-none shadow-2xl pointer-events-none flex flex-col items-center gap-1">
-                    <Crop size={24} className="mb-1 opacity-80"/><span className="font-bold">拖拽选取区域</span><span className="text-[10px] opacity-60">右键退出</span>
+                    <Crop size={24} className="mb-1 opacity-80"/><span className="font-bold">拖拽选取区域</span><span className="text-[10px] opacity-60">右键退出 / 双击确认</span>
                 </div>
             )}
         </div>
@@ -788,32 +799,39 @@ export const SelectorWindow = () => {
 // --- 独立窗口：参考图 ---
 export const ReferenceWindow = () => {
     const [imgSrc, setImgSrc] = useState(null);
-    const [originalPath, setOriginalPath] = useState(null); // [Fix] 新增状态：存储原始路径
+    const [originalPath, setOriginalPath] = useState(null);
     const [isTopmost, setIsTopmost] = useState(true);
-    const [isGray, setIsGray] = useState(false); 
     const [opacity, setOpacity] = useState(100);
     const [ignoreMouse, setIgnoreMouse] = useState(false);
-    // 视图状态
+    
+    // [修复] 滤镜状态: 'none', 'gray', 'binary', 'posterize'
+    const [filterMode, setFilterMode] = useState('none');
+    // [修复] 记忆上一次选择的滤镜模式 (默认灰度)
+    const [lastFilterMode, setLastFilterMode] = useState('gray');
+    
+    // 滤镜阈值 (0-100), 用于二值化阈值或四分色偏
+    const [filterVal, setFilterVal] = useState(50);
+    // 菜单防抖
+    const [showFilterMenu, setShowFilterMenu] = useState(false);
+    const menuTimerRef = useRef(null);
+
     const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
     const [isDraggingView, setIsDraggingView] = useState(false);
 
-    // [修复] 改回 Base64 读取模式，解决 Asset 协议在临时目录的权限问题导致的裂图
+    // 动态生成唯一ID，防止多窗口冲突
+    const [winId] = useState(() => Math.floor(Math.random() * 100000));
+    const lang = navigator.language.startsWith('zh') ? 'zh' : 'en';
+
     const loadRefImage = async (pathOrUrl) => {
         if (!pathOrUrl) return;
-        
-        // [Fix] 如果是本地文件路径（非 Base64/HTTP），记录下来用于保存
         if (!pathOrUrl.startsWith('data:')) {
             setOriginalPath(pathOrUrl);
         }
-
-        // If Base64 or http, show directly
         if (pathOrUrl.startsWith('data:') || pathOrUrl.startsWith('http')) {
             setImgSrc(pathOrUrl);
             return;
         }
-
         try {
-            // Call backend to read file as Base64
             const base64 = await invoke('read_image_as_base64', { path: pathOrUrl });
             setImgSrc(base64);
         } catch (e) {
@@ -822,21 +840,15 @@ export const ReferenceWindow = () => {
     };
 
     useEffect(() => {
-        // 1. 优先从 URL 参数读取路径 (解决 LocalStorage 竞态)
         const params = new URLSearchParams(window.location.search);
         const urlPath = params.get('path');
-        
         if (urlPath) {
             loadRefImage(urlPath);
         } else {
-            // 2. 兼容旧逻辑 (截图预览等)
             const tempImg = localStorage.getItem('ref-temp-img');
             const tempPath = localStorage.getItem('ref-temp-path');
-            
             if (tempPath) {
                 loadRefImage(tempPath);
-                // [修改] 保留路径，供记忆功能使用
-                // localStorage.removeItem('ref-temp-path'); 
             } else if (tempImg) {
                 setImgSrc(tempImg);
                 localStorage.removeItem('ref-temp-img');
@@ -865,25 +877,43 @@ export const ReferenceWindow = () => {
         setView(v => ({ ...v, scale: Math.max(0.1, Math.min(20, v.scale * delta)) }));
     };
 
-    const handleMouseDown = (e) => {
-        if (ignoreMouse) return; 
+    const handlePointerDown = (e) => {
+        if (ignoreMouse) return;
+        
         e.stopPropagation();
-        if (e.button === 2) { 
+
+        // 1. 右键：视口平移
+        if (e.button === 2 || e.buttons === 2) { 
+            e.currentTarget.setPointerCapture(e.pointerId);
             setIsDraggingView(true); 
-        } else if (e.button === 0) { 
-            appWindow.startDragging(); 
+        } 
+        // 2. 左键/笔尖：窗口拖拽 
+        else if (e.button === 0 || e.pointerType === 'pen' || e.pointerType === 'touch') { 
+            // 释放捕获，将控制权移交系统窗口管理器
+            try { 
+                if(e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    e.currentTarget.releasePointerCapture(e.pointerId); 
+                }
+            } catch(err){}
+            
+            appWindow.startDragging().catch(() => {});
         }
     };
     
-    const handleMouseMove = (e) => {
+    const handlePointerMove = (e) => {
         if (isDraggingView) {
             setView(v => ({ ...v, x: v.x + e.movementX, y: v.y + e.movementY }));
         }
     };
+    
+    const handlePointerUp = (e) => {
+        if (isDraggingView) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+            setIsDraggingView(false);
+        }
+    };
 
-    // [修复 2] 状态汇报逻辑 (增加 onMoved 和 onResized 监听)
     useEffect(() => {
-        // 封装汇报函数
         const reportState = async () => {
             if (imgSrc && !imgSrc.startsWith('http')) {
                 try {
@@ -894,21 +924,21 @@ export const ReferenceWindow = () => {
                     emit('ref-report-state', {
                         label: appWindow.label,
                         path: originalPath || (imgSrc.startsWith('http') ? imgSrc : null),
-                        // 统一转换为逻辑坐标保存
                         x: Math.round(pos.x / dpr),
                         y: Math.round(pos.y / dpr),
                         w: Math.round(size.width / dpr),
                         h: Math.round(size.height / dpr),
-                        opacity, isGray, isTopmost, ignoreMouse, view
+                        // 兼容性映射：将 filterMode 映射给旧逻辑
+                        opacity, 
+                        isGray: filterMode !== 'none', 
+                        filterMode, filterVal, // [新增]
+                        isTopmost, ignoreMouse, view
                     });
                 } catch(e) {}
             }
         };
 
-        // 1. 基础状态变化时汇报 (防抖)
         const timer = setTimeout(reportState, 500);
-
-        // 2. [新增] 监听窗口移动和大小改变
         const unlistenMove = appWindow.onMoved(reportState);
         const unlistenResize = appWindow.onResized(reportState);
 
@@ -917,9 +947,8 @@ export const ReferenceWindow = () => {
             unlistenMove.then(f => f());
             unlistenResize.then(f => f());
         };
-    }, [imgSrc, opacity, isGray, isTopmost, ignoreMouse, view]); // 依赖项不变
+    }, [imgSrc, opacity, filterMode, filterVal, isTopmost, ignoreMouse, view]); 
 
-    // 窗口关闭时发送销毁事件
     useEffect(() => {
         const unlisten = appWindow.onCloseRequested(() => {
             emit('ref-window-closed', { label: appWindow.label });
@@ -927,8 +956,29 @@ export const ReferenceWindow = () => {
         return () => { unlisten.then(f => f()); };
     }, []);
 
+    // 动态滤镜 ID 生成
+    const getFilterId = () => {
+        if (filterMode === 'gray') return 'url(#simple-gray-filter)'; // 使用 MyComponents 中的简单灰度
+        if (filterMode === 'binary') return `url(#ref-binary-${winId})`;
+        if (filterMode === 'posterize') return `url(#ref-posterize-${winId})`;
+        return 'none';
+    };
+
+    // 菜单防抖处理
+    const handleMenuEnter = () => {
+        if (menuTimerRef.current) clearTimeout(menuTimerRef.current);
+        setShowFilterMenu(true);
+    };
+    const handleMenuLeave = () => {
+        menuTimerRef.current = setTimeout(() => setShowFilterMenu(false), 300); // 300ms 延迟
+    };
+
     return (
-        <div className="w-full h-full relative group overflow-hidden bg-transparent"
+        <div className="w-full h-full relative group overflow-hidden touch-none"
+            style={{ 
+                backgroundColor: 'rgba(0,0,0,0.02)', // [修复] 给一个极低透明度背景，防止完全透明导致的笔尖穿透
+                touchAction: 'none'                  // [修复] 禁止滚动/手势
+            }}
             onDragOver={e => e.preventDefault()}
             onDrop={e => {
                 e.preventDefault();
@@ -936,12 +986,55 @@ export const ReferenceWindow = () => {
                 if(file && file.type.startsWith('image/')) setImgSrc(URL.createObjectURL(file));
             }}
             onWheel={handleWheel}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={() => setIsDraggingView(false)}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
             onContextMenu={e => e.preventDefault()}
         >
              <GlobalSvgFilters icc="rec601"/>
+             
+             {/* [新增] 本地动态滤镜定义 (用于 Slider 实时调节) */}
+             <svg className="hidden">
+                <defs>
+                    {/* 二值化滤镜: 灰度 -> 线性拉伸截断 */}
+                    <filter id={`ref-binary-${winId}`}>
+                        <feColorMatrix type="matrix" values="0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0 0 0 1 0"/>
+                        <feComponentTransfer>
+                            {/* 这里的 slope 和 intercept 负责根据 slider 值移动阈值 */}
+                            {/* 阈值 T (0..1) -> 对应 val (0..100) */}
+                            {/* 要让 T 处的值变为 0.5 (线性中点)，Slope 设为极大值(如255)以形成硬边 */}
+                            {/* Intercept = 0.5 - T * Slope */}
+                            <feFuncR type="linear" slope="255" intercept={0.5 - (filterVal/100) * 255} />
+                            <feFuncG type="linear" slope="255" intercept={0.5 - (filterVal/100) * 255} />
+                            <feFuncB type="linear" slope="255" intercept={0.5 - (filterVal/100) * 255} />
+                        </feComponentTransfer>
+                        {/* 截断至 0 或 1 */}
+                        <feComponentTransfer>
+                             <feFuncR type="discrete" tableValues="0 1"/>
+                             <feFuncG type="discrete" tableValues="0 1"/>
+                             <feFuncB type="discrete" tableValues="0 1"/>
+                        </feComponentTransfer>
+                    </filter>
+                    
+                    {/* 四分色 (Posterize): 灰度 -> 偏置 -> 量化 */}
+                    <filter id={`ref-posterize-${winId}`}>
+                         <feColorMatrix type="matrix" values="0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0 0 0 1 0"/>
+                         {/* 亮度偏置 (Bias) */}
+                         <feComponentTransfer>
+                            <feFuncR type="linear" slope="1" intercept={(filterVal - 50) / 100} />
+                            <feFuncG type="linear" slope="1" intercept={(filterVal - 50) / 100} />
+                            <feFuncB type="linear" slope="1" intercept={(filterVal - 50) / 100} />
+                         </feComponentTransfer>
+                         {/* 离散化为 4 阶 */}
+                         <feComponentTransfer>
+                             <feFuncR type="discrete" tableValues="0 0.33 0.66 1"/>
+                             <feFuncG type="discrete" tableValues="0 0.33 0.66 1"/>
+                             <feFuncB type="discrete" tableValues="0 0.33 0.66 1"/>
+                         </feComponentTransfer>
+                    </filter>
+                </defs>
+             </svg>
+
             {imgSrc ? (
                 <div className={`w-full h-full flex items-center justify-center ${ignoreMouse ? 'pointer-events-none' : ''}`}>
                     <img 
@@ -949,10 +1042,10 @@ export const ReferenceWindow = () => {
                         draggable={false}
                         className="select-none transition-transform duration-75 ease-out w-full h-full object-contain pointer-events-none"
                         style={{ 
-                            // 使用 object-contain 配合 w-full h-full 实现自适应
                             transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
                             opacity: opacity/100,
-                            filter: isGray ? 'url(#dynamic-gray-filter)' : 'none'
+                            // [修复] 使用动态获取的滤镜 ID
+                            filter: getFilterId()
                         }} 
                     />
                 </div>
@@ -961,20 +1054,18 @@ export const ReferenceWindow = () => {
             )}
             {!ignoreMouse && (
                 <>
-                    {/* 边缘缩放把手 - [修复] 更新 API */}
-                    <div className="absolute top-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(1);}} />
-                    <div className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(2);}} />
-                    <div className="absolute top-0 left-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(8);}} />
-                    <div className="absolute top-0 right-0 w-2 h-full cursor-ew-resize z-40" onMouseDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(4);}} />
+                    <div className="absolute top-0 left-0 w-full h-2 cursor-ns-resize z-40" onPointerDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(1);}} />
+                    <div className="absolute bottom-0 left-0 w-full h-2 cursor-ns-resize z-40" onPointerDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(2);}} />
+                    <div className="absolute top-0 left-0 w-2 h-full cursor-ew-resize z-40" onPointerDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(8);}} />
+                    <div className="absolute top-0 right-0 w-2 h-full cursor-ew-resize z-40" onPointerDown={(e)=>{e.stopPropagation();appWindow.startResizeDragging(4);}} />
                 </>
             )}
             
             <div data-tauri-no-drag 
                  className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-[9999] pointer-events-auto"
-                 onMouseDown={(e) => e.stopPropagation()} 
+                 onPointerDown={(e) => e.stopPropagation()} 
             >
-                    <div className="flex gap-1 justify-end">
-                        {/* 重置按钮 */}
+                    <div className="flex gap-1 justify-end items-start relative">
                         <button 
                             onClick={(e) => { e.stopPropagation(); setView({x:0, y:0, scale:1}); }} 
                             className="p-1.5 rounded bg-black/60 text-white/80 hover:bg-slate-600 hover:text-white cursor-pointer shadow-sm backdrop-blur-sm" 
@@ -983,7 +1074,72 @@ export const ReferenceWindow = () => {
                             <RotateCcw size={10}/>
                         </button>
                         
-                        <button onClick={(e) => { e.stopPropagation(); setIsGray(!isGray); }} className={`p-1.5 rounded transition-colors cursor-pointer shadow-sm backdrop-blur-sm ${isGray ? 'bg-purple-600 text-white' : 'bg-black/60 text-white/80'}`} title="灰度 (Gray)"><Layers size={10}/></button>
+                        {/* [新增] 高级滤镜菜单按钮组 */}
+                        <div className="relative flex flex-col items-end"
+                             onMouseEnter={handleMenuEnter}
+                             onMouseLeave={handleMenuLeave}
+                        >
+                             <button 
+                                 onClick={(e) => { 
+                                     e.stopPropagation(); 
+                                     // 点击主按钮：切换
+                                     setFilterMode(prev => prev === 'none' ? lastFilterMode : 'none');
+                                 }} 
+                                 // [修复] 加深背景色(bg-zinc-800)解决"透明"问题，移除模糊提升清晰度
+                                 className={`p-1.5 rounded transition-colors cursor-pointer shadow-sm relative z-20
+                                     ${filterMode !== 'none' ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-gray-200 hover:bg-zinc-700'}`} 
+                                 title={lang==='zh' ? `切换滤镜 (${filterMode==='none' ? '开启' : '关闭'})` : "Toggle Filter"}
+                             >
+                                 <Layers size={10}/>
+                             </button>
+                             
+                             {/* 下拉菜单面板 - [修复] 位置改为 top-full (下方显示)，避免遮挡左右按钮 */}
+                             {showFilterMenu && (
+                                 <div className="absolute top-full right-0 mt-2 z-[9999]">
+                                     <div className="bg-[#1a1a1a] border border-white/20 rounded-md shadow-xl p-1 flex flex-col gap-0.5 w-24 animate-in fade-in slide-in-from-top-1 pointer-events-auto"> 
+                                         <div className="text-[9px] font-bold text-white/40 px-1 py-0.5">{lang==='zh'?'滤镜':'Filters'}</div>
+                                         <div className="grid grid-cols-1 gap-0.5">
+                                             {[
+                                                 { id: 'none', label: lang==='zh'?'原图':'Original' },
+                                                 { id: 'gray', label: lang==='zh'?'灰度':'Gray' },
+                                                 { id: 'binary', label: lang==='zh'?'二值化':'Binary' },
+                                                 { id: 'posterize', label: lang==='zh'?'四分':'4-Tone' },
+                                             ].map(m => (
+                                                 <button 
+                                                     key={m.id}
+                                                     onClick={(e) => { 
+                                                         e.stopPropagation(); 
+                                                         setFilterMode(m.id); 
+                                                         if (m.id !== 'none') setLastFilterMode(m.id);
+                                                     }}
+                                                     className={`text-[9px] text-left px-1.5 py-0.5 rounded transition-colors ${filterMode===m.id ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-400 hover:bg-white/10 hover:text-gray-200'}`}
+                                                 >
+                                                     {m.label}
+                                                 </button>
+                                             ))}
+                                         </div>
+                                         
+                                         {/* 阈值滑块 */}
+                                         {(filterMode === 'binary' || filterMode === 'posterize') && (
+                                             <div className="border-t border-white/10 pt-1 mt-0.5 px-0.5 pb-0.5">
+                                                 <div className="flex justify-between text-[8px] text-gray-500 mb-0.5">
+                                                     <span>{filterMode==='binary' ? (lang==='zh'?'阈值':'Thresh') : (lang==='zh'?'偏移':'Bias')}</span>
+                                                     <span>{filterVal}</span>
+                                                 </div>
+                                                 <input 
+                                                     type="range" min="0" max="100" step="1"
+                                                     value={filterVal}
+                                                     onChange={(e) => setFilterVal(Number(e.target.value))}
+                                                     className="w-full h-1 accent-purple-500 cursor-pointer block"
+                                                     onPointerDown={e => e.stopPropagation()}
+                                                 />
+                                             </div>
+                                         )}
+                                     </div>
+                                 </div>
+                             )}
+                        </div>
+
                         <button onClick={(e) => { 
                             e.stopPropagation();
                             const newState = !isTopmost; 
@@ -993,8 +1149,10 @@ export const ReferenceWindow = () => {
                         className={`p-1.5 rounded transition-colors cursor-pointer shadow-sm backdrop-blur-sm ${isTopmost ? `bg-slate-500 text-white` : 'bg-black/60 text-white/80'}`} title="置顶 (Pin)"><Pin size={10}/></button>
                         <button onClick={(e) => { e.stopPropagation(); appWindow.close(); }} className="p-1.5 rounded bg-red-500 text-white hover:bg-red-600 cursor-pointer shadow-sm backdrop-blur-sm"><X size={10}/></button>
                     </div>
+                
+                {/* 底部透明度滑块 */}
                 <input type="range" min="10" max="100" value={opacity} onChange={e=>setOpacity(e.target.value)} 
-                    className="w-24 h-1 accent-slate-500 cursor-pointer" onMouseDown={e => e.stopPropagation()} 
+                    className="w-24 h-1 accent-slate-500 cursor-pointer mt-1" onPointerDown={e => e.stopPropagation()} 
                 />
         </div>
     </div>

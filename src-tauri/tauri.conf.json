@@ -23,6 +23,7 @@
         "center": true,
         "fullscreen": false,
         "hiddenTitle": true,
+        "dragDropEnabled": false,
         "windowEffects": {
           "effects": ["blur"], 
           "color": "#00000000"

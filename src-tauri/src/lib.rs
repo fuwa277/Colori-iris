@@ -1,5 +1,27 @@
-use tauri::Manager; // 恢复引入 Manager 以修复 get_webview_window 报错
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use tauri::{Manager, Emitter}; // 引入 Emitter 以支持后端发送事件 (解决 emit 报错)
+use enigo::{Direction, Enigo, Key, Keyboard, Settings, Mouse}; // 引入 Mouse 特征以支持获取坐标 (解决 location 报错)
+
+use windows::Win32::Foundation::POINT;
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+#[tauri::command]
+fn get_mouse_pos() -> (i32, i32) {
+    unsafe {
+        let mut point = POINT::default();
+        let _ = GetCursorPos(&mut point);
+        (point.x, point.y)
+    }
+}
+
+#[tauri::command]
+fn position_window_at_mouse(app: tauri::AppHandle, label: String) {
+    if let Some(window) = app.get_webview_window(&label) {
+        let mut enigo = Enigo::new(&Settings::default()).unwrap();
+        if let Ok((x, y)) = enigo.location() {
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+        }
+    }
+}
 
 #[tauri::command]
 fn set_window_topmost(window: tauri::Window, topmost: bool) {
@@ -30,7 +52,12 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_clipboard_manager::init())
-    .invoke_handler(tauri::generate_handler![set_window_topmost, trigger_system_grayscale])
+    .invoke_handler(tauri::generate_handler![
+        set_window_topmost, 
+        trigger_system_grayscale, 
+        get_mouse_pos,
+        position_window_at_mouse
+    ])
     .setup(|app| {
       // --- 修复1: 添加系统托盘 ---
       use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -47,20 +74,15 @@ pub fn run() {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => app.exit(0),
             "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // WakePip 解绑：不再直接 show 窗口，而是发送信号让前端主窗口自己决定显隐
+                let _ = app.emit("tray-show-main", ());
             }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
-                let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // WakePip 解绑：左键点击托盘也通过信号处理，避免级联唤醒画中画
+                let _ = tray.app_handle().emit("tray-show-main", ());
             }
         })
         .build(app)?;

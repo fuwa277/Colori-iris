@@ -136,6 +136,7 @@ export const GlobalSvgFilters = ({ icc = 'rec601' }) => {
     return (
     <svg className="hidden">
         <defs>
+            {/* 1. 动态灰度 (保留用于吸色等需要精准亮度的场景) */}
             <filter id="dynamic-gray-filter">
                 <feComponentTransfer>
                     <feFuncR type="gamma" amplitude="1" exponent="2.2" offset="0"/>
@@ -148,6 +149,11 @@ export const GlobalSvgFilters = ({ icc = 'rec601' }) => {
                     <feFuncG type="gamma" amplitude="1" exponent="0.4545" offset="0"/>
                     <feFuncB type="gamma" amplitude="1" exponent="0.4545" offset="0"/>
                 </feComponentTransfer>
+            </filter>
+
+            {/* 2. [修复] 简单灰度 (用于参考图，匹配监视器/绘图软件的直接去色效果) */}
+            <filter id="simple-gray-filter">
+                <feColorMatrix type="matrix" values={`${coeffs.r} ${coeffs.g} ${coeffs.b} 0 0  ${coeffs.r} ${coeffs.g} ${coeffs.b} 0 0  ${coeffs.r} ${coeffs.g} ${coeffs.b} 0 0  0 0 0 1 0`} />
             </filter>
         </defs>
     </svg>
@@ -298,8 +304,8 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
       setIsDraggingRing(false); setIsDraggingShape(false); 
   };
 
-  // 1. 竖向混色槽 [修复: 拖拽逻辑]
-  const GroupMixingVertical = () => (
+  // 1. 竖向混色槽 [改名为渲染函数以修复重绘闪烁]
+  const renderMixingVertical = () => (
       <div className="flex flex-col items-center gap-2 h-full py-1">
          <div onClick={() => onSlotClick(1)} className={`w-[14px] h-[14px] shrink-0 rounded-full border cursor-pointer transition-all shadow-sm ring-1 ring-black/5 ${activeSlot === 1 ? `border-white ring-slate-400 scale-125` : 'border-white/20 opacity-60 hover:opacity-100'}`} style={{ backgroundColor: rgbToHex(colorSlots[1]?.r||0, colorSlots[1]?.g||0, colorSlots[1]?.b||0) }} />
          
@@ -342,8 +348,8 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
       </div>
   );
 
-  // 2. 方槽 + 功能键 [修复: 支持对齐参数]
-  const GroupSquare = ({ align = 'end' }) => (
+  // 2. 方槽 + 功能键 [改名为渲染函数]
+  const renderGroupSquare = (align = 'end') => (
      <div className={`flex flex-col gap-1.5 items-${align}`}>
          <div className="flex flex-col gap-1">
              <button 
@@ -410,7 +416,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
         <div className="w-8 flex flex-col justify-between items-start z-30">
             {/* 默认(非镜像): 混色条在左。镜像: 方槽在左 */}
             {!leftHanded ? (
-                <GroupMixingVertical />
+                renderMixingVertical()
             ) : (
                 <>
                     <button onClick={onToggleMode} 
@@ -420,7 +426,7 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                     >
                         {pickerMode === 'triangle' ? <Triangle size={14} className="rotate-90 fill-current"/> : <Grid size={14} className="fill-current"/>}
                     </button>
-                    <GroupSquare align="start" />
+                    {renderGroupSquare('start')}
                 </>
             )}
         </div>
@@ -449,10 +455,10 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
                     >
                         {pickerMode === 'triangle' ? <Triangle size={14} className="rotate-90 fill-current"/> : <Grid size={14} className="fill-current"/>}
                     </button>
-                    <GroupSquare align="end" />
+                    {renderGroupSquare('end')}
                 </>
             ) : (
-                <GroupMixingVertical />
+                renderMixingVertical()
             )}
         </div>
     </div>
@@ -463,7 +469,24 @@ export const ColorPickerArea = ({ hue, saturation, value, onChange, onUpdateCurr
 export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, value, onPickColor, alg = 'rec601', lang, useGamma, setUseGamma }) => {
   const t = (zh, en) => lang === 'zh' ? zh : en; 
   const canvasRef = useRef(null);
+  const containerRef = useRef(null); 
   const [crosshair, setCrosshair] = useState(null);
+  const [dims, setDims] = useState({ w: 240, h: 120 });
+
+  // 动态同步绘制分辨率与视觉尺寸，防止拉伸变形
+  useEffect(() => {
+      if (!containerRef.current) return;
+      const obs = new ResizeObserver(entries => {
+          for (let entry of entries) {
+              const { width, height } = entry.contentRect;
+              if (width > 0 && height > 0) {
+                  setDims({ w: Math.round(width), h: Math.round(height) });
+              }
+          }
+      });
+      obs.observe(containerRef.current);
+      return () => obs.disconnect();
+  }, []);
   // const [useGamma, setUseGamma] = useState(true); // 已移交父组件管理
 
   // [新增] 自适应 Tooltip 状态
@@ -527,7 +550,8 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, value, onP
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const w = canvas.width; const h = canvas.height;
+    // 使用动态计算的物理像素尺寸
+    const w = dims.w; const h = dims.h;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,0,w,h); 
     const imgData = ctx.getImageData(0, 0, w, h);
@@ -588,9 +612,9 @@ export const IsoLuminanceGraph = ({ targetLuminance, hue, saturation, value, onP
   };
 
   return (
-    <div className="w-full relative group">
+    <div ref={containerRef} className="w-full relative group">
        <canvas 
-         ref={canvasRef} width={240} height={120} 
+         ref={canvasRef} width={dims.w} height={dims.h} 
          className="w-full h-[120px] rounded border border-white/10 cursor-crosshair touch-none"
          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); handlePointer(e); }}
          onPointerMove={handlePointer}
@@ -1044,16 +1068,40 @@ export const RegionSelector = ({ onConfirm, onCancel }) => {
         return { x, y, w, h };
     };
 
+    // [修复] 支持数位笔/触摸屏操作 (Pointer Events)
+    const handlePointerDown = (e) => {
+        // 必须 setPointerCapture 才能在移出元素时继续捕获移动
+        e.currentTarget.setPointerCapture(e.pointerId);
+        e.preventDefault(); 
+        setStartPos({ x: e.clientX, y: e.clientY });
+        setCurrentPos({ x: e.clientX, y: e.clientY });
+    };
+
+    const handlePointerMove = (e) => {
+        if (startPos) {
+            e.preventDefault();
+            setCurrentPos({ x: e.clientX, y: e.clientY });
+        }
+    };
+
+    const handlePointerUp = (e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        const rect = getRect();
+        if (rect && rect.w > 10 && rect.h > 10) onConfirm(rect);
+        else onCancel();
+        setStartPos(null);
+    };
+
     return (
         <div 
-            className="fixed inset-0 z-[9999] cursor-crosshair bg-black/10"
-            onMouseDown={(e) => setStartPos({ x: e.clientX, y: e.clientY })}
-            onMouseMove={(e) => startPos && setCurrentPos({ x: e.clientX, y: e.clientY })}
-            onMouseUp={() => {
+            className="fixed inset-0 z-[9999] cursor-crosshair bg-black/10 touch-none" // [修复] touch-none 禁止浏览器缩放
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onDoubleClick={() => {
+                // [修复] 数位笔双击确认逻辑
                 const rect = getRect();
-                if (rect && rect.w > 10 && rect.h > 10) onConfirm(rect);
-                else onCancel();
-                setStartPos(null);
+                if (rect && rect.w > 10) onConfirm(rect);
             }}
         >
             <div className="absolute inset-0 bg-black/50 pointer-events-none" 
@@ -1069,8 +1117,8 @@ export const RegionSelector = ({ onConfirm, onCancel }) => {
                     </div>
                 </div>
             )}
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 text-white bg-black/70 px-4 py-1 rounded-full text-xs pointer-events-none">
-                按住鼠标左键框选区域 / 点击取消
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 text-white bg-black/70 px-4 py-1 rounded-full text-xs pointer-events-none select-none">
+                按住框选 / 双击确认 / 点击取消
             </div>
         </div>
     );

@@ -24,15 +24,9 @@ export const useTauriBackend = () => {
         const updateCoords = async () => {
             if (colorBlockRef.current) {
                 try {
-                    const rect = colorBlockRef.current.getBoundingClientRect();
-                    const winPos = await appWindow.outerPosition();
-                    
-                    // Fix 7: 兼容 DPI 缩放 (DOM Rect 是逻辑像素，winPos 是物理像素)
-                    const dpr = window.devicePixelRatio || 1;
-                    const screenX = Math.round(winPos.x + (rect.left + rect.width / 2) * dpr);
-                    const screenY = Math.round(winPos.y + (rect.top + rect.height / 2) * dpr);
-                    
-                    await invoke('update_sync_coords', { x: screenX, y: screenY });
+                    // 直接调用后端获取当前物理坐标并更新，避免前端 DPI 计算误差
+                    const pos = await invoke('get_mouse_pos');
+                    await invoke('update_sync_coords', { x: pos[0], y: pos[1] });
                 } catch (e) {
                     // 忽略窗口关闭或最小化时的错误
                 }

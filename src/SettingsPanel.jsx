@@ -211,6 +211,20 @@ export const SettingsPanel = ({
                         </div>
                     </div>
                 </div>
+
+                <div className="flex justify-between items-center text-xs h-7">
+                    <span className="w-16 truncate">{t('面板显隐', 'Toggle Main')}</span>
+                    <div className="flex-1 flex justify-end gap-3 items-center">
+                        <HotkeyRecorder 
+                            uniqueKey="hotkeyShowHide" activeRecorder={activeRecorder} onActivate={setActiveRecorder}
+                            value={settings.hotkeyShowHide} onChange={(val) => updateHotkey('hotkeyShowHide', val)} 
+                            placeholder="None" isDark={isDark} 
+                        />
+                        <div onClick={() => setSettings({...settings, globalShowHide: !settings.globalShowHide})} className={`w-8 h-4 rounded-full flex items-center px-0.5 cursor-pointer transition-colors ${settings.globalShowHide ? 'bg-slate-500' : 'bg-gray-500/30'}`}>
+                            <div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform duration-200 ${settings.globalShowHide ? 'translate-x-4' : 'translate-x-0'}`} />
+                        </div>
+                    </div>
+                </div>
                 
                 <div className={`mt-2 pt-2 border-t border-gray-500/10 space-y-3`}>
                     {/* [优化] 增加管理员权限提示 & 输入法警告 */}
@@ -336,7 +350,7 @@ export const SettingsPanel = ({
                                 <Palette size={20} />
                             </div>
                             <h2 className="text-xl font-bold tracking-wide">Colori</h2>
-                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.0.8 (Offline)</span>
+                            <span className="text-[10px] opacity-50 font-mono mt-1">v1.1.0 (Offline)</span>
                         </div>
 
                         <div className="space-y-4">

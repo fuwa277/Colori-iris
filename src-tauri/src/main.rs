@@ -94,8 +94,10 @@ static HK_REGION_CODE: AtomicI32 = AtomicI32::new(0); // [新增]
 static HK_REGION_MODS: AtomicI32 = AtomicI32::new(0);
 static HK_REF_CODE: AtomicI32 = AtomicI32::new(0);    // [新增]
 static HK_REF_MODS: AtomicI32 = AtomicI32::new(0);
+static HK_SHOW_CODE: AtomicI32 = AtomicI32::new(0);   // [新增]
+static HK_SHOW_MODS: AtomicI32 = AtomicI32::new(0);
 // 额外快捷键的全局开关
-static HK_GLOBAL_FLAGS: AtomicI32 = AtomicI32::new(0); // 位掩码: 1=Gray, 2=Pick, 4=Moni, 8=Region, 16=Ref
+static HK_GLOBAL_FLAGS: AtomicI32 = AtomicI32::new(0); // 位掩码: 1=Gray, 2=Pick, 4=Moni, 8=Region, 16=Ref, 32=Show
 // 目标进程名称 (None 代表不限制)
 static TARGET_PROCESS_NAME: Mutex<Option<String>> = Mutex::new(None);
 
@@ -1158,16 +1160,17 @@ fn parse_hotkey(combo: &str) -> (i32, i32) {
 }
 
 #[tauri::command]
-fn update_extra_hotkeys(gray: String, pick: String, moni: String, region: String, ref_key: String, flags: i32) {
+fn update_extra_hotkeys(gray: String, pick: String, moni: String, region: String, ref_key: String, show: String, flags: i32) {
     let (gc, gm) = parse_hotkey(&gray);
     let (pc, pm) = parse_hotkey(&pick);
     let (mc, mm) = parse_hotkey(&moni);
     let (reg_c, reg_m) = parse_hotkey(&region);
     let (ref_c, ref_m) = parse_hotkey(&ref_key);
+    let (sc, sm) = parse_hotkey(&show);
     
     // 添加日志
-    log_to_file(format!("Global Hotkeys: Gray={:?}, Pick={:?}, Moni={:?}, Region={:?}, Ref={:?}, Flags={}", 
-        &gray, &pick, &moni, &region, &ref_key, flags));
+    log_to_file(format!("Global Hotkeys: Gray={:?}, Pick={:?}, Moni={:?}, Region={:?}, Ref={:?}, Show={:?}, Flags={}", 
+        &gray, &pick, &moni, &region, &ref_key, &show, flags));
 
     HK_GRAY_CODE.store(gc, Ordering::Relaxed);
     HK_GRAY_MODS.store(gm, Ordering::Relaxed);
@@ -1179,6 +1182,8 @@ fn update_extra_hotkeys(gray: String, pick: String, moni: String, region: String
     HK_REGION_MODS.store(reg_m, Ordering::Relaxed);
     HK_REF_CODE.store(ref_c, Ordering::Relaxed);
     HK_REF_MODS.store(ref_m, Ordering::Relaxed);
+    HK_SHOW_CODE.store(sc, Ordering::Relaxed);
+    HK_SHOW_MODS.store(sm, Ordering::Relaxed);
     
     HK_GLOBAL_FLAGS.store(flags, Ordering::Relaxed);
 }
@@ -1394,6 +1399,7 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
         let mut last_moni = false;
         let mut last_region = false;
         let mut last_ref = false;
+        let mut last_show = false;
 
         loop {
             thread::sleep(Duration::from_millis(10));
@@ -1524,6 +1530,18 @@ fn start_global_hotkey_listener(app_handle: tauri::AppHandle) {
                             let _ = app_handle.emit("global-hotkey", "ref");
                         }
                         last_ref = pressed;
+                    }
+                }
+
+                // Show/Hide (Flag 32)
+                if (flags & 32) != 0 {
+                    let code = HK_SHOW_CODE.load(Ordering::Relaxed);
+                    if code != 0 {
+                        let pressed = (GetAsyncKeyState(code) as u16 & 0x8000) != 0;
+                        if pressed && !last_show && mods == HK_SHOW_MODS.load(Ordering::Relaxed) {
+                            let _ = app_handle.emit("global-hotkey", "show_hide");
+                        }
+                        last_show = pressed;
                     }
                 }
             }
@@ -1709,19 +1727,23 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             let target_style = base_style | WS_EX_TOOLWINDOW.0 as i32 | WS_EX_NOACTIVATE.0 as i32 | WS_EX_LAYERED.0 as i32 | WS_EX_TRANSPARENT.0 as i32;
             SetWindowLongW(spot_hwnd, GWL_EXSTYLE, target_style);
 
-            // [Fix] 增大色块尺寸至 100x100，以覆盖多屏 DPI 缩放导致的坐标偏移误差
-            let size = 100;
+            // 彻底放弃前端传入坐标，强制实时获取鼠标物理位置
+            let mut current_mouse_pos = POINT::default();
+            GetCursorPos(&mut current_mouse_pos);
+
+            let size = 120; // 进一步增大色块以应对极高分辨率下的采样
             let offset = size / 2;
             let _ = SetWindowPos(
                 spot_hwnd, HWND_TOPMOST, 
-                original_pos.x - offset, original_pos.y - offset, size, size, 
+                current_mouse_pos.x - offset, current_mouse_pos.y - offset, size, size, 
                 SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW
             );
             let _ = ShowWindow(spot_hwnd, SW_SHOWNOACTIVATE);
             
-            // [修复] 等待 DWM 渲染：针对双屏/高负载环境，增加到 100ms
-            // 确保窗口在副屏完全渲染可见，防止吸取穿透
-            thread::sleep(Duration::from_millis(100));
+            // [修复] 针对多屏环境进一步增加延迟，确保色块在副屏完全绘制完成
+            thread::sleep(Duration::from_millis(150));
+            // 并在点击前再次确认鼠标位置，防止用户在宏执行期间微动鼠标
+            let _ = SetCursorPos(current_mouse_pos.x, current_mouse_pos.y);
 
             // --- 步骤 3: 模拟点击 ---
             // 再次校准鼠标位置
@@ -1782,16 +1804,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     .plugin(tauri_plugin_clipboard_manager::init())
     // [新增] 单实例插件：检测到重复启动时，唤醒已存在的窗口
     .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        if let Some(win) = app.get_webview_window("main") {
-            // 执行与托盘双击完全一致的“强制显示”逻辑
-            let _ = win.emit("pip-wake", ());
-            let _ = win.set_skip_taskbar(false);
-            if win.is_minimized().unwrap_or(false) {
-                let _ = win.unminimize();
-            }
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
+        // WakePip 解绑：不再直接 show 窗口，而是发送信号让前端主窗口自己决定显隐
+        let _ = app.emit("tray-show-main", ());
     }))
     .manage(WindowState {
       is_topmost: Mutex::new(false),
@@ -1821,11 +1835,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             .on_menu_event(|app, event| match event.id.as_ref() {
                 "quit" => app.exit(0),
                 "show" => {
-                    if let Some(win) = app.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                        if win.is_minimized().unwrap_or(false) { let _ = win.unminimize(); }
-                    }
+                    // WakePip 解绑：通过信号处理，避免级联唤醒画中画
+                    let _ = app.emit("tray-show-main", ());
                 },
                 "reset" => {
                     if let Some(win) = app.get_webview_window("main") {
@@ -1844,13 +1855,8 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
                         // 左键单击 OR 双击：统一执行“强制显示”逻辑
                         TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } 
                         | TrayIconEvent::DoubleClick { button: tauri::tray::MouseButton::Left, .. } => {
-                            let _ = win.emit("pip-wake", ());
-                            let _ = win.set_skip_taskbar(false);
-                            if win.is_minimized().unwrap_or(false) {
-                                let _ = win.unminimize();
-                            }
-                            let _ = win.show();
-                            let _ = win.set_focus();
+                            // WakePip 解绑：左键点击托盘也通过信号处理，避免级联唤醒画中画
+                            let _ = app.emit("tray-show-main", ());
                         }
                         _ => {}
                     }
