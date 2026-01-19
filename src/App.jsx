@@ -278,7 +278,37 @@ const openSelectorWindow = async (label, url) => {
       syncOnToggle: false
   }));
   const [runningApps, setRunningApps] = useState([]); 
-  const [monitorPos, setMonitorPos] = useState(null); 
+  const [monitorPos, setMonitorPos] = useState(null);
+  
+  // [需求] UI 缩放状态 (Ctrl+滚轮)
+  const [uiZoom, setUiZoom] = useState(() => parseFloat(localStorage.getItem('colori_ui_zoom') || '1'));
+  const [showZoomTip, setShowZoomTip] = useState(false);
+  const zoomTipTimer = useRef(null);
+  
+  // 监听 Ctrl+滚轮
+  useEffect(() => {
+      const handleWheel = (e) => {
+          if (e.ctrlKey) {
+              e.preventDefault();
+              const delta = e.deltaY > 0 ? -0.05 : 0.05; // 滚轮向下缩小，向上放大
+              setUiZoom(prev => {
+                  const val = Math.min(Math.max(0.6, prev + delta), 2.0); // 限制范围 0.6x ~ 2.0x
+                  localStorage.setItem('colori_ui_zoom', val);
+                  
+                  // 触发右上角提示
+                  setShowZoomTip(true);
+                  if (zoomTipTimer.current) clearTimeout(zoomTipTimer.current);
+                  zoomTipTimer.current = setTimeout(() => setShowZoomTip(false), 2000);
+                  
+                  return val;
+              });
+          }
+      };
+      // 添加到 window 并在捕获阶段阻止浏览器默认缩放
+      window.addEventListener('wheel', handleWheel, { passive: false });
+      return () => window.removeEventListener('wheel', handleWheel);
+  }, []);
+
   // [Issue 2] 独立的监控色状态，不干扰主色槽
   const [monitorRgb, setMonitorRgb] = useState({ r:0, g:0, b:0 });
   // [需求1] 监控同步开关
@@ -1255,8 +1285,22 @@ const openSelectorWindow = async (label, url) => {
             </div>
         )}
 
+        {/* 缩放提示 (右上角, 点击还原) */}
+        {showZoomTip && (
+            <div 
+                className="fixed top-16 right-4 z-[9999] bg-black/80 text-white px-3 py-1.5 rounded-lg shadow-xl text-xs font-mono cursor-pointer hover:bg-blue-600 transition-colors pointer-events-auto backdrop-blur animate-in fade-in slide-in-from-top-2"
+                onClick={() => {
+                    setUiZoom(1);
+                    localStorage.setItem('colori_ui_zoom', 1);
+                    setShowZoomTip(false);
+                }}
+            >
+                Zoom: {Math.round(uiZoom * 100)}% (Reset)
+            </div>
+        )}
+
         {/* --- 顶部标题栏 --- */}
-        <div className="h-14 shrink-0 flex items-center justify-between px-3 border-b border-gray-500/10 drag-region select-none z-50 bg-inherit">
+        <div className="h-14 shrink-0 flex items-center justify-between px-3 border-b border-gray-500/10 drag-region select-none z-50 bg-inherit" style={{ zoom: uiZoom }}>
            <div className="flex items-center gap-2 pointer-events-none">
               <div className="w-6 h-6 bg-gradient-to-tr from-blue-500 to-purple-500 rounded-lg flex items-center justify-center text-white shadow-lg">
                   <Palette size={14} />
@@ -1317,12 +1361,16 @@ const openSelectorWindow = async (label, url) => {
 
         {/* --- 主要内容区域 --- */}
         {/* [修复2] 根据 Tab 类型决定滚动策略：Color/Screen 内部自理，其他(Settings/Ref)由父容器滚动 */}
-        <div className={`flex-1 min-h-0 relative ${['settings', 'push'].includes(activeTab) ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'}`}>
+        {/* [需求] 应用 zoom 样式实现缩放，但保留 flex 布局结构 */}
+        <div 
+            className={`flex-1 min-h-0 relative ${['settings', 'push'].includes(activeTab) ? 'overflow-y-auto custom-scrollbar' : 'overflow-hidden'}`}
+            style={{ zoom: uiZoom }} // 应用缩放
+        >
            {renderActiveTabContent()}
         </div>
 
         {/* --- 底部导航栏 --- */}
-        <div className={`h-14 shrink-0 border-t border-white/5 backdrop-blur-xl flex justify-around items-center z-[100] ${isDark ? 'bg-[#1f1f23]/95' : 'bg-[#f5f5f5]/95'}`}>
+        <div className={`h-14 shrink-0 border-t border-white/5 backdrop-blur-xl flex justify-around items-center z-[100] ${isDark ? 'bg-[#1f1f23]/95' : 'bg-[#f5f5f5]/95'}`} style={{ zoom: uiZoom }}>
             {[
                 {id: 'color', icon: Pipette, l: t('调色', 'Color')},
                 {id: 'screen', icon: Monitor, l: t('屏幕', 'Screen')},

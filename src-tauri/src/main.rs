@@ -1786,9 +1786,12 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
             // --- 步骤 5: 隐藏色块 ---
             let _ = ShowWindow(spot_hwnd, SW_HIDE);
             
-            // [修复] 恢复之前按下的修饰键
+            // [修复] 恢复之前按下的修饰键 (仅当用户物理上仍按住时才恢复，防止粘滞)
             for vk in mods_to_restore {
-                send_key(vk, false); // Press down
+                // 再次检查物理状态，只有当最高位为1 (按下) 时才模拟按下
+                if (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 {
+                    send_key(vk, false); // Press down
+                }
             }
 
             // 归还焦点
@@ -1811,6 +1814,12 @@ fn perform_color_sync_macro(app: &tauri::AppHandle) {
     .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // WakePip 解绑：不再直接 show 窗口，而是发送信号让前端主窗口自己决定显隐
         let _ = app.emit("tray-show-main", ());
+        // [修复] 强制后端唤醒：防止前端未就绪导致无法唤醒，作为双重保险
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
     }))
     .manage(WindowState {
       is_topmost: Mutex::new(false),
